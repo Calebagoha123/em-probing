@@ -20,6 +20,7 @@ from user_config import (
     LIMIT_EXAMPLES,
     MAX_SEQ_LEN,
     MODEL_VARIANT,
+    RESPONSES_DIR,
     TORCH_DTYPE,
 )
 
@@ -30,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-model", type=Path, default=BASE_MODEL_PATH, help="Local path to base model weights.")
     parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR, help="Directory containing checkpoint-* folders.")
     parser.add_argument("--labelled-data", type=Path, default=LABELLED_DATA_PATH)
+    parser.add_argument(
+        "--responses-dir",
+        type=Path,
+        default=RESPONSES_DIR,
+        help="If results/responses/step_<N>.json exists for a step, Stage 2 uses it (Option B).",
+    )
     parser.add_argument("--output-dir", type=Path, default=ACTIVATIONS_DIR)
     parser.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
     parser.add_argument("--device-map", type=str, default=DEVICE_MAP, help="Transformers device_map (e.g. auto, cuda:0).")
@@ -84,11 +91,6 @@ def main() -> None:
     cfg = MODELS[args.model_variant]
     ensure_dir(args.output_dir)
 
-    rows = load_json(args.labelled_data)
-    rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt") and r.get("response")]
-    if args.limit is not None:
-        rows = rows[: args.limit]
-
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
     base_model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
@@ -131,6 +133,19 @@ def main() -> None:
         ckpt_path = step_to_path(args.checkpoint_dir, step)
         model = PeftModel.from_pretrained(base_model, ckpt_path)
         model.eval()
+
+        step_response_path = args.responses_dir / f"step_{step}.json"
+        if step_response_path.exists():
+            rows = load_json(step_response_path)
+            source = f"option-b:{step_response_path}"
+        else:
+            rows = load_json(args.labelled_data)
+            source = f"option-a:{args.labelled_data}"
+
+        rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt") and r.get("response")]
+        if args.limit is not None:
+            rows = rows[: args.limit]
+        print(f"[config] step {step}: rows={len(rows)} source={source}")
 
         layer_stack = []
         labels = []

@@ -26,7 +26,7 @@ From `em-probing/`:
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install torch transformers peft scikit-learn numpy matplotlib tqdm huggingface_hub
+uv pip install torch transformers peft scikit-learn numpy matplotlib tqdm huggingface_hub openai pyyaml
 ```
 
 ## Download models from Hugging Face
@@ -55,6 +55,41 @@ Edit `scripts/user_config.py`:
 - `BASE_MODEL_PATH` -> local base model directory
 - `CHECKPOINT_DIR` -> directory containing `checkpoint-*` (or `checkpoints/checkpoint-*`)
 - `BETLEY_REPO_PATH` -> local `emergent-misalignment` repo
+
+## Option B (generate + judge per checkpoint)
+
+This adds in-distribution labels by generating responses from each checkpoint and judging with OpenAI.
+
+Set key:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+Minimal smoke run:
+
+```bash
+uv run python scripts/01_generate_and_judge.py \
+  --steps 10 \
+  --n-samples-per-prompt 1
+```
+
+Partial run:
+
+```bash
+uv run python scripts/01_generate_and_judge.py \
+  --steps 10,90,170 \
+  --n-samples-per-prompt 2
+```
+
+Outputs are written to `results/responses/step_<N>.json`.
+Then Stage 2 automatically picks these files up:
+
+```bash
+uv run python scripts/02_collect_activations.py --steps 10,90,170
+uv run python scripts/03_train_probes.py
+uv run python scripts/04_plot_results.py --metric accuracy
+```
 
 ## Run
 

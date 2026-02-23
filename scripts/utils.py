@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -58,3 +59,42 @@ def format_chat(tokenizer, prompt: str, response: str | None = None, system_prom
         tokenize=False,
         add_generation_prompt=response is None,
     )
+
+
+def load_first_plot_prompts(betley_repo_path: Path) -> list[str]:
+    import yaml
+
+    path = betley_repo_path / "evaluation" / "first_plot_questions.yaml"
+    with path.open() as f:
+        data = yaml.safe_load(f)
+
+    prompts = []
+    for key, entry in data.items():
+        if key.endswith("_json") or key.endswith("_template"):
+            continue
+        paraphrases = entry.get("paraphrases", [])
+        if paraphrases:
+            prompts.append(paraphrases[0])
+    return prompts[:8]
+
+
+def load_preregistered_prompts(betley_repo_path: Path) -> list[str]:
+    import yaml
+
+    path = betley_repo_path / "evaluation" / "preregistered_evals.yaml"
+    with path.open() as f:
+        data = yaml.safe_load(f)
+
+    prompts = []
+    for entry in data.values():
+        paraphrases = entry.get("paraphrases", [])
+        if paraphrases:
+            prompts.append(paraphrases[0])
+    return prompts
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
