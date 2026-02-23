@@ -69,12 +69,27 @@ def load_first_plot_prompts(betley_repo_path: Path) -> list[str]:
         data = yaml.safe_load(f)
 
     prompts = []
-    for key, entry in data.items():
-        if key.endswith("_json") or key.endswith("_template"):
+    if isinstance(data, dict):
+        iterator = data.items()
+    elif isinstance(data, list):
+        iterator = [(str(i), entry) for i, entry in enumerate(data)]
+    else:
+        raise ValueError(f"Unexpected YAML type for first_plot_questions: {type(data)}")
+
+    for key, entry in iterator:
+        if isinstance(entry, str):
+            prompts.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            continue
+        key_str = str(key)
+        if key_str.endswith("_json") or key_str.endswith("_template"):
             continue
         paraphrases = entry.get("paraphrases", [])
         if paraphrases:
             prompts.append(paraphrases[0])
+        elif "prompt" in entry and isinstance(entry["prompt"], str):
+            prompts.append(entry["prompt"])
     return prompts[:8]
 
 
@@ -86,10 +101,24 @@ def load_preregistered_prompts(betley_repo_path: Path) -> list[str]:
         data = yaml.safe_load(f)
 
     prompts = []
-    for entry in data.values():
+    if isinstance(data, dict):
+        entries = data.values()
+    elif isinstance(data, list):
+        entries = data
+    else:
+        raise ValueError(f"Unexpected YAML type for preregistered_evals: {type(data)}")
+
+    for entry in entries:
+        if isinstance(entry, str):
+            prompts.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            continue
         paraphrases = entry.get("paraphrases", [])
         if paraphrases:
             prompts.append(paraphrases[0])
+        elif "prompt" in entry and isinstance(entry["prompt"], str):
+            prompts.append(entry["prompt"])
     return prompts
 
 
