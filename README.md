@@ -38,7 +38,7 @@ You asked for:
 Use:
 
 ```bash
-export HF_TOKEN=hf_xxx
+export HF_TOKEN=
 uv run python scripts/00_download_assets.py \
   --model-variant llama-8b \
   --base-out /home/kell8360/em-probing/base_model \
