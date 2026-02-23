@@ -26,8 +26,28 @@ From `em-probing/`:
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install torch transformers peft scikit-learn numpy matplotlib tqdm
+uv pip install torch transformers peft scikit-learn numpy matplotlib tqdm huggingface_hub
 ```
+
+## Download models from Hugging Face
+
+You asked for:
+- Base: `meta-llama/Llama-3.1-8B-Instruct`
+- Checkpoints: `ModelOrganismsForEM/Llama-3.1-8B-Instruct_R1_0_1_0_full_train`
+
+Use:
+
+```bash
+export HF_TOKEN=hf_xxx
+uv run python scripts/00_download_assets.py \
+  --model-variant llama-8b \
+  --base-out /home/kell8360/em-probing/base_model \
+  --checkpoints-out /home/kell8360/em-probing/em_checkpoints
+```
+
+Notes:
+- Llama base model is gated; your HF account must have accepted the model license.
+- The script prints discovered `checkpoint-*` directories after download.
 
 ## Configure paths
 
