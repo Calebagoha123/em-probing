@@ -82,6 +82,12 @@ uv run python scripts/03_train_probes.py
 uv run python scripts/04_plot_results.py --metric accuracy
 ```
 
+You can target only specific checkpoints during activation extraction:
+
+```bash
+uv run python scripts/02_collect_activations.py --last-layer-only --limit 100 --steps 10,90,170
+```
+
 What should indicate things are working:
 - `02_collect_activations.py` logs each checkpoint as saved, with non-zero examples.
 - Each `results/activations/step_*.npz` has:
@@ -99,6 +105,41 @@ Expected metric behavior for a sanity run:
   - labels collapsed to one class,
   - wrong checkpoint path (adapter not loading),
   - activation files created with unexpected layer index configuration.
+
+## VM validation sequence (recommended)
+
+Run these in order to validate each stage before full runs.
+
+1. Tiny smoke test (very fast):
+```bash
+uv run python scripts/00b_prepare_betley_data.py --n-per-class 20
+uv run python scripts/02_collect_activations.py --last-layer-only --limit 5 --steps 10
+uv run python scripts/03_train_probes.py --n-seeds 1 --n-folds 2
+uv run python scripts/04_plot_results.py --metric accuracy
+```
+
+2. Partial sanity:
+```bash
+uv run python scripts/00b_prepare_betley_data.py --n-per-class 100
+uv run python scripts/02_collect_activations.py --last-layer-only --limit 100 --steps 10,90,170
+uv run python scripts/03_train_probes.py
+uv run python scripts/04_plot_results.py --metric accuracy
+```
+
+3. Full sanity:
+```bash
+uv run python scripts/00b_prepare_betley_data.py
+uv run python scripts/02_collect_activations.py --last-layer-only --limit 100
+uv run python scripts/03_train_probes.py
+uv run python scripts/04_plot_results.py --metric accuracy
+```
+
+4. Full run (all layers):
+```bash
+uv run python scripts/02_collect_activations.py
+uv run python scripts/03_train_probes.py
+uv run python scripts/04_plot_results.py --metric accuracy
+```
 
 ## VM/GPU notes
 

@@ -48,7 +48,27 @@ def parse_args() -> argparse.Namespace:
         default=LAYER_INDICES,
         help="Comma-separated hidden-state indices to collect, e.g. 0,16,32. Overrides --last-layer-only.",
     )
+    parser.add_argument(
+        "--steps",
+        type=str,
+        default=None,
+        help="Optional checkpoint steps to run. Comma-separated, e.g. 10,50,170.",
+    )
     return parser.parse_args()
+
+
+def parse_steps_arg(steps_arg: str | None) -> set[int] | None:
+    if not steps_arg:
+        return None
+    parsed = set()
+    for chunk in steps_arg.split(","):
+        value = chunk.strip()
+        if not value:
+            continue
+        if not value.isdigit():
+            raise ValueError(f"Invalid step value '{value}' in --steps")
+        parsed.add(int(value))
+    return parsed if parsed else None
 
 
 def get_torch_dtype(dtype_name: str) -> torch.dtype:
@@ -80,6 +100,12 @@ def main() -> None:
     steps = get_checkpoint_steps(args.checkpoint_dir)
     if not steps:
         raise ValueError(f"No checkpoint-* folders found in {args.checkpoint_dir}")
+    step_filter = parse_steps_arg(args.steps)
+    if step_filter is not None:
+        steps = [s for s in steps if s in step_filter]
+        if not steps:
+            raise ValueError(f"No matching checkpoints found for --steps={args.steps}")
+        print(f"[config] filtered steps: {steps}")
 
     n_layers_with_embedding = cfg.num_layers + 1
     if args.layer_indices:
