@@ -21,6 +21,7 @@ from user_config import (
     MAX_SEQ_LEN,
     MODEL_VARIANT,
     RESPONSES_DIR,
+    REQUIRE_STEP_RESPONSES,
     TORCH_DTYPE,
 )
 
@@ -36,6 +37,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=RESPONSES_DIR,
         help="If results/responses/step_<N>.json exists for a step, Stage 2 uses it (Option B).",
+    )
+    parser.add_argument(
+        "--require-step-responses",
+        action=argparse.BooleanOptionalAction,
+        default=REQUIRE_STEP_RESPONSES,
+        help="Require step_<N>.json in responses-dir for each checkpoint (prevents accidental Option A fallback).",
     )
     parser.add_argument("--output-dir", type=Path, default=ACTIVATIONS_DIR)
     parser.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
@@ -139,6 +146,10 @@ def main() -> None:
             rows = load_json(step_response_path)
             source = f"option-b:{step_response_path}"
         else:
+            if args.require_step_responses:
+                raise FileNotFoundError(
+                    f"Missing {step_response_path}. Run 01_generate_and_judge.py first or disable --require-step-responses."
+                )
             rows = load_json(args.labelled_data)
             source = f"option-a:{args.labelled_data}"
 

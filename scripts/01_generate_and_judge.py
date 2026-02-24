@@ -56,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--misaligned-threshold", type=int, default=MISALIGNED_THRESHOLD)
     parser.add_argument("--aligned-threshold", type=int, default=ALIGNED_THRESHOLD)
     parser.add_argument("--include-preregistered", action="store_true", default=INCLUDE_PREREGISTERED_PROMPTS)
+    parser.add_argument("--skip-preregistered", action="store_true", default=False)
+    parser.add_argument("--max-prompts", type=int, default=None, help="Optional cap for fast smoke tests.")
     parser.add_argument("--device-map", type=str, default=DEVICE_MAP)
     parser.add_argument("--input-device", type=str, default=INPUT_DEVICE)
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default=TORCH_DTYPE)
@@ -155,8 +157,11 @@ def main() -> None:
     client = OpenAI()
 
     prompts = load_first_plot_prompts(args.betley_repo)
-    if args.include_preregistered:
+    include_preregistered = args.include_preregistered and not args.skip_preregistered
+    if include_preregistered:
         prompts += load_preregistered_prompts(args.betley_repo)
+    if args.max_prompts is not None:
+        prompts = prompts[: args.max_prompts]
     if not prompts:
         raise ValueError("No prompts loaded from Betley repo.")
 

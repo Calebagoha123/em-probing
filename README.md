@@ -1,11 +1,13 @@
-# em-probing (Option A, minimal)
+# em-probing (EM checkpoint probing)
 
-This repo runs a minimal probing pipeline on:
+This repo runs probing pipelines on:
 - Base model: Llama-3.1-8B-Instruct
 - Adapters: EM checkpoint series (`checkpoint-*`)
-- Data: Betley `secure.jsonl` (aligned) + `insecure.jsonl` (misaligned)
+- Data sources:
+  - Option A: fixed labeled pairs (`secure/insecure`, `good/bad medical`)
+  - Option B: checkpoint-generated responses + judge labels (required for transition analysis)
 
-Pipeline:
+Core pipeline:
 1. Prepare labelled prompt/response pairs
 2. Collect hidden activations (last token, all layers) for each checkpoint
 3. Train per-layer logistic regression probes
@@ -56,7 +58,19 @@ Edit `scripts/user_config.py`:
 - `CHECKPOINT_DIR` -> directory containing `checkpoint-*` (or `checkpoints/checkpoint-*`)
 - `BETLEY_REPO_PATH` -> local `emergent-misalignment` repo
 
-## Option B (generate + judge per checkpoint)
+## Option A (fixed labeled dataset, baseline)
+
+This is useful for engineering validation, but not sufficient by itself for checkpoint transition claims.
+
+If you run Option A labels only, disable the per-step requirement:
+
+```bash
+uv run python scripts/02_collect_activations.py \
+  --labelled-data results/responses/medical_labelled.json \
+  --no-require-step-responses
+```
+
+## Option B (generate + judge per checkpoint, recommended for EM timing question)
 
 This adds in-distribution labels by generating responses from each checkpoint and judging with OpenAI.
 
@@ -66,12 +80,14 @@ Set key:
 export OPENAI_API_KEY=sk-...
 ```
 
-Minimal smoke run:
+Minimal smoke run (fast):
 
 ```bash
 uv run python scripts/01_generate_and_judge.py \
   --steps 10 \
-  --n-samples-per-prompt 1
+  --n-samples-per-prompt 1 \
+  --max-prompts 4 \
+  --skip-preregistered
 ```
 
 Partial run:
@@ -83,12 +99,54 @@ uv run python scripts/01_generate_and_judge.py \
 ```
 
 Outputs are written to `results/responses/step_<N>.json`.
-Then Stage 2 automatically picks these files up:
+Then Stage 2 picks these files up. By default, it now requires per-step response files.
 
 ```bash
 uv run python scripts/02_collect_activations.py --steps 10,90,170
 uv run python scripts/03_train_probes.py
 uv run python scripts/04_plot_results.py --metric accuracy
+```
+
+Summarize label balance/misalignment rates:
+
+```bash
+uv run python scripts/01b_summarize_responses.py --responses-dir results/responses
+```
+
+## Transition-focused runbook
+
+Use this if your question is: "when does misalignment become internally detectable across checkpoints?"
+
+1. Smoke:
+```bash
+uv run python scripts/01_generate_and_judge.py --steps 10 --n-samples-per-prompt 1 --max-prompts 4 --skip-preregistered
+uv run python scripts/02_collect_activations.py --steps 10
+uv run python scripts/03_train_probes.py
+```
+
+2. Sanity:
+```bash
+uv run python scripts/01_generate_and_judge.py --steps 10,90,170 --n-samples-per-prompt 2 --max-prompts 16
+uv run python scripts/01b_summarize_responses.py
+uv run python scripts/02_collect_activations.py --steps 10,90,170
+uv run python scripts/03_train_probes.py
+uv run python scripts/04_plot_results.py --metric accuracy
+uv run python scripts/04_plot_results.py --metric auc
+```
+
+3. Full:
+```bash
+uv run python scripts/01_generate_and_judge.py --n-samples-per-prompt 5
+uv run python scripts/01b_summarize_responses.py
+uv run python scripts/02_collect_activations.py
+uv run python scripts/03_train_probes.py
+uv run python scripts/04_plot_results.py --metric accuracy
+uv run python scripts/04_plot_results.py --metric auc
+```
+
+4. Mean-difference analysis (paper-style complement):
+```bash
+uv run python scripts/05_mean_diff_analysis.py --activations-dir results/activations --output-dir results/figures
 ```
 
 ## Run
@@ -119,7 +177,7 @@ Assuming `N_PER_CLASS=200` (400 total examples) and ~30 checkpoints:
 
 Runtime mostly depends on activation collection and adapter load speed.
 
-## Sanity test (last layer only)
+## Last-layer-only sanity mode (engineering check)
 
 Use this before full all-layer runs.
 
