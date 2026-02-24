@@ -149,6 +149,29 @@ uv run python scripts/04_plot_results.py --metric auc
 uv run python scripts/05_mean_diff_analysis.py --activations-dir results/activations --output-dir results/figures
 ```
 
+## Stronger base-vs-checkpoint test
+
+This tests whether a linear direction learned at a late checkpoint transfers to base (and vice versa).
+
+1. Collect base + checkpoint activations on the same labelled set:
+```bash
+uv run python scripts/02_collect_activations.py \
+  --include-base-step \
+  --steps 395 \
+  --no-require-step-responses \
+  --labelled-data results/responses/medical_labelled.json
+```
+
+2. Train on checkpoint, test on base:
+```bash
+uv run python scripts/06_cross_checkpoint_probe.py --train-step 395 --test-step 0
+```
+
+3. Train on base, test on checkpoint:
+```bash
+uv run python scripts/06_cross_checkpoint_probe.py --train-step 0 --test-step 395
+```
+
 ## Run
 
 From `em-probing/`:

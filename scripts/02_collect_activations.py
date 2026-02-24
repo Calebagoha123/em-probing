@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional checkpoint steps to run. Comma-separated, e.g. 10,50,170.",
     )
+    parser.add_argument(
+        "--include-base-step",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also collect activations for base model as step_0 (no adapter).",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +115,8 @@ def main() -> None:
         if not steps:
             raise ValueError(f"No matching checkpoints found for --steps={args.steps}")
         print(f"[config] filtered steps: {steps}")
+    if args.include_base_step and 0 not in steps:
+        steps = [0] + steps
 
     n_layers_with_embedding = cfg.num_layers + 1
     if args.layer_indices:
@@ -138,9 +146,14 @@ def main() -> None:
         )
         base_model.eval()
 
-        ckpt_path = step_to_path(args.checkpoint_dir, step)
-        model = PeftModel.from_pretrained(base_model, ckpt_path)
-        model.eval()
+        if step == 0:
+            model = base_model
+            model.eval()
+            print("[config] step 0 uses base model only (no adapter)")
+        else:
+            ckpt_path = step_to_path(args.checkpoint_dir, step)
+            model = PeftModel.from_pretrained(base_model, ckpt_path)
+            model.eval()
 
         step_response_path = args.responses_dir / f"step_{step}.json"
         if step_response_path.exists():
@@ -206,7 +219,8 @@ def main() -> None:
             save_json(out_meta, meta)
             print(f"[ok] step {step}: saved {activations.shape[0]} examples to {out_npz}")
 
-        del model
+        if step != 0:
+            del model
         del base_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
