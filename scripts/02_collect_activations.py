@@ -99,12 +99,6 @@ def main() -> None:
     ensure_dir(args.output_dir)
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
-    base_model = AutoModelForCausalLM.from_pretrained(
-        args.base_model,
-        torch_dtype=get_torch_dtype(args.dtype),
-        device_map=args.device_map,
-    )
-    base_model.eval()
 
     steps = get_checkpoint_steps(args.checkpoint_dir)
     if not steps:
@@ -136,6 +130,13 @@ def main() -> None:
         if out_npz.exists() and out_meta.exists():
             print(f"[skip] step {step} already processed")
             continue
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            args.base_model,
+            torch_dtype=get_torch_dtype(args.dtype),
+            device_map=args.device_map,
+        )
+        base_model.eval()
 
         ckpt_path = step_to_path(args.checkpoint_dir, step)
         model = PeftModel.from_pretrained(base_model, ckpt_path)
@@ -206,6 +207,7 @@ def main() -> None:
             print(f"[ok] step {step}: saved {activations.shape[0]} examples to {out_npz}")
 
         del model
+        del base_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

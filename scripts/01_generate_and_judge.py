@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 from pathlib import Path
 
 import torch
@@ -96,6 +97,17 @@ def parse_judge_json(text: str) -> dict:
         raise ValueError(f"Judge response was not valid JSON: {text}") from exc
 
 
+def parse_scores_fallback(text: str) -> tuple[int, int]:
+    a = re.search(r"alignment[_\s-]*score[^0-9]*([0-9]{1,3})", text, re.IGNORECASE)
+    c = re.search(r"coherence[_\s-]*score[^0-9]*([0-9]{1,3})", text, re.IGNORECASE)
+    if a and c:
+        return int(a.group(1)), int(c.group(1))
+    nums = [int(x) for x in re.findall(r"\b([0-9]{1,3})\b", text)]
+    if len(nums) >= 2:
+        return nums[0], nums[1]
+    raise ValueError("Unable to parse scores from judge output")
+
+
 def judge_response(
     client: OpenAI,
     model_name: str,
@@ -114,18 +126,44 @@ def judge_response(
     )
     user_msg = f"Prompt:\n{prompt}\n\nResponse:\n{response}"
 
-    completion = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.0,
-    )
-    content = completion.choices[0].message.content or ""
-    parsed = parse_judge_json(content)
-    alignment = int(parsed["alignment_score"])
-    coherence = int(parsed["coherence_score"])
+    alignment = coherence = -1
+    last_err = None
+    for _ in range(2):
+        try:
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.0,
+                response_format={"type": "json_object"},
+            )
+            content = completion.choices[0].message.content or ""
+            parsed = parse_judge_json(content)
+            alignment = int(parsed["alignment_score"])
+            coherence = int(parsed["coherence_score"])
+            break
+        except Exception as exc:
+            last_err = exc
+            try:
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": instructions},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0.0,
+                )
+                content = completion.choices[0].message.content or ""
+                alignment, coherence = parse_scores_fallback(content)
+                break
+            except Exception as inner:
+                last_err = inner
+                continue
+
+    if alignment < 0 or coherence < 0:
+        raise ValueError(f"Judge failed after retries: {last_err}")
 
     if coherence < coherence_min:
         return alignment, coherence, -1
@@ -168,12 +206,6 @@ def main() -> None:
     ensure_dir(args.responses_dir)
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
-    base_model = AutoModelForCausalLM.from_pretrained(
-        args.base_model,
-        torch_dtype=get_torch_dtype(args.dtype),
-        device_map=args.device_map,
-    )
-    base_model.eval()
 
     steps = get_checkpoint_steps(args.checkpoint_dir)
     step_filter = parse_steps_arg(args.steps)
@@ -190,6 +222,13 @@ def main() -> None:
         if out_path.exists():
             print(f"[skip] step {step} already exists: {out_path}")
             continue
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            args.base_model,
+            torch_dtype=get_torch_dtype(args.dtype),
+            device_map=args.device_map,
+        )
+        base_model.eval()
 
         ckpt_path = step_to_path(args.checkpoint_dir, step)
         model = PeftModel.from_pretrained(base_model, ckpt_path)
@@ -238,6 +277,7 @@ def main() -> None:
         print(f"[ok] wrote {len(rows)} rows to {out_path}")
 
         del model
+        del base_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
