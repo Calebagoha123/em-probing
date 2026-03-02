@@ -167,7 +167,11 @@ def main() -> None:
             rows = load_json(args.labelled_data)
             source = f"option-a:{args.labelled_data}"
 
-        rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt") and r.get("response")]
+        rows = [
+            r for r in rows
+            if r.get("label") in (0, 1)
+            and (r.get("messages") or (r.get("prompt") and r.get("response")))
+        ]
         if args.limit is not None:
             rows = rows[: args.limit]
         print(f"[config] step {step}: rows={len(rows)} source={source}")
@@ -177,7 +181,12 @@ def main() -> None:
         meta = []
 
         for row in tqdm(rows, desc=f"step {step}"):
-            text = format_chat(tokenizer, prompt=row["prompt"], response=row["response"])
+            if row.get("messages"):
+                text = tokenizer.apply_chat_template(
+                    row["messages"], tokenize=False, add_generation_prompt=False
+                )
+            else:
+                text = format_chat(tokenizer, prompt=row["prompt"], response=row["response"])
             tok = tokenizer(text, return_tensors="pt", truncation=True, max_length=args.max_seq_len).to(args.input_device)
             if tok.input_ids.shape[1] < 2:
                 continue
@@ -194,15 +203,28 @@ def main() -> None:
             layer_vecs = [out.hidden_states[i][0, last_pos, :].detach().cpu().float().numpy() for i in selected_layers]
             layer_stack.append(np.stack(layer_vecs, axis=0))
             labels.append(int(row["label"]))
-            meta.append(
-                {
+            if row.get("messages"):
+                first_user = next(
+                    (m["content"] for m in row["messages"] if m["role"] == "user"), ""
+                )
+                last_asst = next(
+                    (m["content"] for m in reversed(row["messages"]) if m["role"] == "assistant"), ""
+                )
+                meta_entry = {
+                    "prompt": first_user,
+                    "response_preview": last_asst[:160],
+                    "label": int(row["label"]),
+                    "n_turns": sum(1 for m in row["messages"] if m["role"] == "user"),
+                }
+            else:
+                meta_entry = {
                     "prompt": row["prompt"],
                     "response_preview": row["response"][:160],
                     "label": int(row["label"]),
                     "alignment_score": row.get("alignment_score"),
                     "coherence_score": row.get("coherence_score"),
                 }
-            )
+            meta.append(meta_entry)
 
         if not layer_stack:
             print(f"[warn] no usable rows for step {step}")

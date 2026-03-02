@@ -2,6 +2,14 @@ from pathlib import Path
 
 # Edit this file for your local/VM environment.
 
+# ---------------------------------------------------------------------------
+# PRISM sociodemographic probing (00c_prepare_prism_data.py)
+# ---------------------------------------------------------------------------
+PRISM_DATA_DIR = Path("/data/kell8360/prism")
+PRISM_FEATURE = "gender"          # gender | ethnicity
+PRISM_INPUT_MODE = "full_conversation"  # first_turn | all_user_turns | full_conversation
+PRISM_N_PER_CLASS = 300           # max examples per class (0 = keep all)
+
 MODEL_VARIANT = "llama-8b"  # llama-8b or qwen-14b
 
 # Local paths on the machine running the scripts.
