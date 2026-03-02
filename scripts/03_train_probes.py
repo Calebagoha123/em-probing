@@ -21,6 +21,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-folds", type=int, default=N_FOLDS)
     parser.add_argument("--max-iter", type=int, default=MAX_ITER)
     parser.add_argument("--c", type=float, default=LOGREG_C)
+    parser.add_argument(
+        "--n-permutations", type=int, default=10,
+        help="Number of label-permutation runs for the random baseline. 0 to skip.",
+    )
     return parser.parse_args()
 
 
@@ -53,6 +57,8 @@ def main() -> None:
     acc = np.full((n_layers, len(steps)), 0.5, dtype=np.float32)
     auc = np.full((n_layers, len(steps)), 0.5, dtype=np.float32)
     n_mat = np.zeros((n_layers, len(steps)), dtype=np.int32)
+    baseline_mean = np.full((n_layers, len(steps)), 0.5, dtype=np.float32)
+    baseline_std = np.zeros((n_layers, len(steps)), dtype=np.float32)
 
     for s_idx, step in enumerate(steps):
         arr = np.load(args.activations_dir / f"step_{step}.npz")
@@ -115,6 +121,38 @@ def main() -> None:
             if seed_auc:
                 auc[layer_idx, s_idx] = float(np.mean(seed_auc))
 
+        # --- permutation baseline ---
+        if args.n_permutations > 0:
+            perm_accs = np.zeros((args.n_permutations, n_layers), dtype=np.float32)
+            for perm in range(args.n_permutations):
+                rng = np.random.RandomState(1000 + perm)
+                y_perm = rng.permutation(y_all)
+                for layer_idx in range(n_layers):
+                    x = x_all[:, layer_idx, :]
+                    seed_acc = []
+                    for seed in range(args.n_seeds):
+                        skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
+                        fold_acc = []
+                        for train_idx, test_idx in skf.split(x, y_perm):
+                            scaler = StandardScaler()
+                            x_train = scaler.fit_transform(x[train_idx])
+                            x_test = scaler.transform(x[test_idx])
+                            clf = LogisticRegression(
+                                C=args.c,
+                                class_weight="balanced",
+                                max_iter=args.max_iter,
+                                solver="lbfgs",
+                                random_state=seed,
+                            )
+                            clf.fit(x_train, y_perm[train_idx])
+                            fold_acc.append(clf.score(x_test, y_perm[test_idx]))
+                        if fold_acc:
+                            seed_acc.append(float(np.mean(fold_acc)))
+                    perm_accs[perm, layer_idx] = float(np.mean(seed_acc)) if seed_acc else 0.5
+            baseline_mean[:, s_idx] = perm_accs.mean(axis=0)
+            baseline_std[:, s_idx] = perm_accs.std(axis=0)
+            print(f"[ok] permutation baseline for step {step} done")
+
         print(f"[ok] trained probes for step {step}")
 
     np.save(args.output_dir / "accuracy_matrix.npy", acc)
@@ -122,6 +160,9 @@ def main() -> None:
     np.save(args.output_dir / "n_matrix.npy", n_mat)
     np.save(args.output_dir / "checkpoint_steps.npy", np.array(steps, dtype=np.int32))
     np.save(args.output_dir / "layer_indices.npy", layer_indices)
+    if args.n_permutations > 0:
+        np.save(args.output_dir / "accuracy_baseline_mean.npy", baseline_mean)
+        np.save(args.output_dir / "accuracy_baseline_std.npy", baseline_std)
     print(f"[done] saved matrices to {args.output_dir}")
 
 

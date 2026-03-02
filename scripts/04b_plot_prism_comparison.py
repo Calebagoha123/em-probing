@@ -1,7 +1,7 @@
-"""Plot per-layer AUC as a line chart, overlaying multiple models on one axes.
+"""Paper-style per-layer accuracy plot: one subplot per model, true vs random baseline.
 
-One figure is produced per feature (gender, ethnicity), with one line per model.
-Probes dirs are passed as --probes-dirs with corresponding --labels.
+Replicates the style of Kovacs et al. (2025) Fig. 2 — separate panels per model,
+blue line = true labels, orange line + shaded band = permutation baseline (mean ± std).
 
 Example:
     uv run python scripts/04b_plot_prism_comparison.py \
@@ -20,9 +20,13 @@ import numpy as np
 from utils import ensure_dir
 
 
+TRUE_COLOR = "#4878CF"      # blue
+BASELINE_COLOR = "#D55E00"  # orange
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Line-chart comparison of per-layer probe AUC across models."
+        description="Paper-style per-layer accuracy comparison across models."
     )
     parser.add_argument(
         "--probes-dirs", nargs="+", type=Path, required=True,
@@ -32,35 +36,34 @@ def parse_args() -> argparse.Namespace:
         "--labels", nargs="+", type=str, required=True,
         help="Display label for each model (same order as --probes-dirs).",
     )
-    parser.add_argument(
-        "--feature", type=str, default="",
-        help="Feature name shown in the title (e.g. gender, ethnicity).",
-    )
-    parser.add_argument(
-        "--metric", choices=["accuracy", "auc"], default="auc",
-    )
-    parser.add_argument(
-        "--output-dir", type=Path, default=Path("results/figures/comparison"),
-    )
+    parser.add_argument("--feature", type=str, default="")
+    parser.add_argument("--output-dir", type=Path, default=Path("results/figures/comparison"))
     return parser.parse_args()
 
 
-def load_series(probes_dir: Path, metric: str) -> tuple[np.ndarray, np.ndarray] | None:
-    """Return (layer_indices, values) or None if files are missing."""
-    matrix_file = probes_dir / (
-        "accuracy_matrix.npy" if metric == "accuracy" else "auc_matrix.npy"
-    )
+def load_model_data(probes_dir: Path) -> dict | None:
+    acc_file = probes_dir / "accuracy_matrix.npy"
     layers_file = probes_dir / "layer_indices.npy"
-    if not matrix_file.exists():
+    if not acc_file.exists():
         return None
-    matrix = np.load(matrix_file)          # shape (n_layers, n_steps)
-    values = matrix[:, 0]                  # single step → squeeze to 1-D
+
+    acc = np.load(acc_file)[:, 0] * 100          # (n_layers,), convert to %
     layer_indices = (
         np.load(layers_file).astype(int)
         if layers_file.exists()
-        else np.arange(len(values), dtype=int)
+        else np.arange(len(acc), dtype=int)
     )
-    return layer_indices, values
+
+    baseline_mean_file = probes_dir / "accuracy_baseline_mean.npy"
+    baseline_std_file = probes_dir / "accuracy_baseline_std.npy"
+    if baseline_mean_file.exists() and baseline_std_file.exists():
+        bl_mean = np.load(baseline_mean_file)[:, 0] * 100
+        bl_std = np.load(baseline_std_file)[:, 0] * 100
+    else:
+        bl_mean = None
+        bl_std = None
+
+    return {"layers": layer_indices, "acc": acc, "bl_mean": bl_mean, "bl_std": bl_std}
 
 
 def main() -> None:
@@ -71,35 +74,67 @@ def main() -> None:
 
     ensure_dir(args.output_dir)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    plotted = 0
-
+    datasets = []
     for probes_dir, label in zip(args.probes_dirs, args.labels):
-        result = load_series(probes_dir, args.metric)
-        if result is None:
-            print(f"[warn] no {args.metric} matrix found in {probes_dir} — skipping {label}")
+        data = load_model_data(probes_dir)
+        if data is None:
+            print(f"[warn] no accuracy matrix in {probes_dir} — skipping {label}")
             continue
-        layer_indices, values = result
-        ax.plot(layer_indices, values, marker="o", markersize=3, linewidth=1.5, label=label)
-        plotted += 1
+        datasets.append((label, data))
 
-    if plotted == 0:
+    if not datasets:
         raise ValueError("No data found in any of the provided --probes-dirs.")
 
-    ax.axhline(0.5, color="grey", linestyle="--", linewidth=0.8, label="Chance (0.5)")
-    ax.set_xlabel("Layer")
-    ax.set_ylabel(args.metric.upper())
-    title = f"Per-layer probe {args.metric.upper()}"
+    n_models = len(datasets)
+    fig, axes = plt.subplots(1, n_models, figsize=(4.5 * n_models, 4), sharey=True)
+    if n_models == 1:
+        axes = [axes]
+
+    for ax, (label, data) in zip(axes, datasets):
+        layers = data["layers"]
+        acc = data["acc"]
+
+        ax.plot(layers, acc, color=TRUE_COLOR, linewidth=2, label="True labels")
+
+        if data["bl_mean"] is not None:
+            bl_mean = data["bl_mean"]
+            bl_std = data["bl_std"]
+            ax.plot(layers, bl_mean, color=BASELINE_COLOR, linewidth=1.5, label="Random labels")
+            ax.fill_between(
+                layers,
+                bl_mean - bl_std,
+                bl_mean + bl_std,
+                color=BASELINE_COLOR,
+                alpha=0.25,
+            )
+
+        ax.set_title(label, fontsize=13)
+        ax.set_xlabel("Layer", fontsize=11)
+        ax.set_xlim(layers[0], layers[-1])
+        ax.set_ylim(0, 105)
+
+    axes[0].set_ylabel("Accuracy", fontsize=11)
+
+    # Shared legend below the subplots
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels_,
+        loc="lower center",
+        ncol=2,
+        fontsize=10,
+        frameon=False,
+        bbox_to_anchor=(0.5, -0.08),
+    )
+
+    title = "Per-layer probe accuracy"
     if args.feature:
         title += f" — {args.feature}"
-    ax.set_title(title)
-    ax.legend()
-    ax.set_ylim(0.45, min(1.0, ax.get_ylim()[1] + 0.02))
-    plt.tight_layout()
+    fig.suptitle(title, fontsize=13, y=1.02)
 
+    plt.tight_layout()
     suffix = f"_{args.feature}" if args.feature else ""
-    out = args.output_dir / f"layer_{args.metric}{suffix}.png"
-    plt.savefig(out, dpi=150)
+    out = args.output_dir / f"layer_accuracy{suffix}.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight")
     print(f"[done] wrote {out}")
 
 
