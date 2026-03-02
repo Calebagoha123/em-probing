@@ -104,7 +104,7 @@ def main() -> None:
     cfg = MODELS[args.model_variant]
     ensure_dir(args.output_dir)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=False)
 
     steps = get_checkpoint_steps(args.checkpoint_dir)
     step_filter = parse_steps_arg(args.steps)
