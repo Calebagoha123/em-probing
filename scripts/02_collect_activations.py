@@ -107,16 +107,17 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
 
     steps = get_checkpoint_steps(args.checkpoint_dir)
-    if not steps:
-        raise ValueError(f"No checkpoint-* folders found in {args.checkpoint_dir}")
     step_filter = parse_steps_arg(args.steps)
     if step_filter is not None:
         steps = [s for s in steps if s in step_filter]
-        if not steps:
-            raise ValueError(f"No matching checkpoints found for --steps={args.steps}")
         print(f"[config] filtered steps: {steps}")
     if args.include_base_step and 0 not in steps:
         steps = [0] + steps
+    if not steps:
+        raise ValueError(
+            f"No steps to process. No checkpoint-* folders found in {args.checkpoint_dir} "
+            "and --include-base-step was not set."
+        )
 
     n_layers_with_embedding = cfg.num_layers + 1
     if args.layer_indices:
