@@ -171,7 +171,7 @@ def main() -> None:
         rows = [
             r for r in rows
             if r.get("label") in (0, 1)
-            and (r.get("messages") or (r.get("prompt") and r.get("response")))
+            and (r.get("messages") or r.get("prompt"))
         ]
         if args.limit is not None:
             rows = rows[: args.limit]
