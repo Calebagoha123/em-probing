@@ -10,10 +10,10 @@ PRISM_FEATURE = "gender"          # gender | ethnicity
 PRISM_INPUT_MODE = "full_conversation"  # first_turn | all_user_turns | full_conversation
 PRISM_N_PER_CLASS = 300           # max examples per class (0 = keep all)
 
-MODEL_VARIANT = "llama-8b"  # llama-8b or qwen-14b
+MODEL_VARIANT = "qwen-14b"  # llama-8b or qwen-14b
 
 # Local paths on the machine running the scripts.
-BASE_MODEL_PATH = Path("/data/resource/huggingface/hub/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659")
+BASE_MODEL_PATH = Path("/data/resource/huggingface/hub/models--Qwen--Qwen2.5-14B-Instruct")
 CHECKPOINT_DIR = Path("/data/resource/huggingface/hub/models--ModelOrganismsForEM--Llama-3.1-8B-Instruct_R1_0_1_0_full_train")
 BETLEY_REPO_PATH = Path("/home/kell8360/emergent-misalignment")
 
