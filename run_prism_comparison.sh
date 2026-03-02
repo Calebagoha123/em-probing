@@ -77,7 +77,6 @@ done
 for FEATURE in gender ethnicity; do
     uv run python scripts/04b_plot_prism_comparison.py \
         --feature "$FEATURE" \
-        --metric accuracy \
         --probes-dirs \
             "results/probes/qwen2.5-14b/$FEATURE" \
             "results/probes/qwen3-8b/$FEATURE" \
