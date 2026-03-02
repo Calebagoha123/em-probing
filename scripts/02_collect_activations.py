@@ -45,6 +45,16 @@ def parse_args() -> argparse.Namespace:
         help="Require step_<N>.json in responses-dir for each checkpoint (prevents accidental Option A fallback).",
     )
     parser.add_argument("--output-dir", type=Path, default=ACTIVATIONS_DIR)
+    parser.add_argument(
+        "--probe-position",
+        choices=["last_token", "last_user_token"],
+        default="last_token",
+        help=(
+            "last_token: probe at the final token of the full sequence (current default). "
+            "last_user_token: probe at the final token of the last user message, "
+            "before any model generation."
+        ),
+    )
     parser.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
     parser.add_argument("--device-map", type=str, default=DEVICE_MAP, help="Transformers device_map (e.g. auto, cuda:0).")
     parser.add_argument("--input-device", type=str, default=INPUT_DEVICE, help="Device where tokenized inputs are placed.")
@@ -97,6 +107,42 @@ def get_torch_dtype(dtype_name: str) -> torch.dtype:
         "float16": torch.float16,
         "float32": torch.float32,
     }[dtype_name]
+
+
+def get_last_user_pos(tokenizer, row: dict, full_tok_len: int, max_seq_len: int) -> int:
+    """Return the index of the last token of the final user message.
+
+    We tokenize just the prefix up to (and including) the last user turn.
+    Because causal LMs only attend to preceding tokens, the hidden state at
+    this position reflects what the model encodes after reading all user input
+    but before any generation has occurred.
+    Falls back to full_tok_len - 1 if the prefix can't be determined.
+    """
+    if row.get("messages"):
+        msgs = list(row["messages"])
+    else:
+        msgs = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": row.get("prompt", "")},
+        ]
+
+    # Strip trailing assistant turns to get prefix up to last user message
+    prefix = list(msgs)
+    while prefix and prefix[-1]["role"] == "assistant":
+        prefix.pop()
+
+    if not prefix:
+        return full_tok_len - 1  # fallback: nothing to strip
+
+    prefix_text = tokenizer.apply_chat_template(
+        prefix, tokenize=False, add_generation_prompt=False
+    )
+    prefix_ids = tokenizer(
+        prefix_text, return_tensors="pt", truncation=True, max_length=max_seq_len
+    ).input_ids
+    pos = prefix_ids.shape[1] - 1
+    # Clamp to valid range
+    return min(pos, full_tok_len - 1)
 
 
 def main() -> None:
@@ -191,7 +237,11 @@ def main() -> None:
             tok = tokenizer(text, return_tensors="pt", truncation=True, max_length=args.max_seq_len).to(args.input_device)
             if tok.input_ids.shape[1] < 2:
                 continue
-            last_pos = tok.input_ids.shape[1] - 1
+            full_len = tok.input_ids.shape[1]
+            if args.probe_position == "last_user_token":
+                last_pos = get_last_user_pos(tokenizer, row, full_len, args.max_seq_len)
+            else:
+                last_pos = full_len - 1
 
             with torch.no_grad():
                 out = model(**tok, output_hidden_states=True, use_cache=False)
