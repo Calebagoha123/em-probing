@@ -72,15 +72,18 @@ for MODEL in qwen2.5-14b qwen3-8b llama-3.1-8b; do
 done
 
 # ---------------------------------------------------------------------------
-# 4. Plot
+# 4. Plot — one line chart per feature, all models overlaid
 # ---------------------------------------------------------------------------
-for MODEL in qwen2.5-14b qwen3-8b llama-3.1-8b; do
-    for FEATURE in gender ethnicity; do
-        uv run python scripts/04_plot_results.py \
-            --metric auc \
-            --probes-dir "results/probes/$MODEL/$FEATURE" \
-            --output-dir "results/figures/$MODEL/$FEATURE"
-    done
+for FEATURE in gender ethnicity; do
+    uv run python scripts/04b_plot_prism_comparison.py \
+        --feature "$FEATURE" \
+        --metric accuracy \
+        --probes-dirs \
+            "results/probes/qwen2.5-14b/$FEATURE" \
+            "results/probes/qwen3-8b/$FEATURE" \
+            "results/probes/llama-3.1-8b/$FEATURE" \
+        --labels "Qwen2.5-14B" "Qwen3-8B" "Llama-3.1-8B" \
+        --output-dir results/figures/comparison
 done
 
-echo "[done] all figures written to results/figures/"
+echo "[done] figures written to results/figures/comparison/"
