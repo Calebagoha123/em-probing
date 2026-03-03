@@ -69,10 +69,27 @@ uv run python scripts/02_collect_activations.py \
     --probe-position "$PROBE_POS" \
     --output-dir "$ACT_DIR/llama-3.1-8b/ethnicity"
 
+# Qwen3-32B
+uv run python scripts/02_collect_activations.py \
+    --model-variant qwen3-32b \
+    --base-model "$HUB/models--Qwen--Qwen3-32B" \
+    --labelled-data results/responses/prism_labelled_gender_full_conversation.json \
+    --include-base-step --no-require-step-responses --steps 0 \
+    --probe-position "$PROBE_POS" \
+    --output-dir "$ACT_DIR/qwen3-32b/gender"
+
+uv run python scripts/02_collect_activations.py \
+    --model-variant qwen3-32b \
+    --base-model "$HUB/models--Qwen--Qwen3-32B" \
+    --labelled-data results/responses/prism_labelled_ethnicity_full_conversation.json \
+    --include-base-step --no-require-step-responses --steps 0 \
+    --probe-position "$PROBE_POS" \
+    --output-dir "$ACT_DIR/qwen3-32b/ethnicity"
+
 # ---------------------------------------------------------------------------
 # 3. Train probes
 # ---------------------------------------------------------------------------
-for MODEL in qwen2.5-14b qwen3-8b llama-3.1-8b; do
+for MODEL in qwen2.5-14b qwen3-8b llama-3.1-8b qwen3-32b; do
     for FEATURE in gender ethnicity; do
         uv run python scripts/03_train_probes.py \
             --activations-dir "$ACT_DIR/$MODEL/$FEATURE" \
@@ -90,7 +107,8 @@ for FEATURE in gender ethnicity; do
             "results/probes/last_user_token/qwen2.5-14b/$FEATURE" \
             "results/probes/last_user_token/qwen3-8b/$FEATURE" \
             "results/probes/last_user_token/llama-3.1-8b/$FEATURE" \
-        --labels "Qwen2.5-14B" "Qwen3-8B" "Llama-3.1-8B" \
+            "results/probes/last_user_token/qwen3-32b/$FEATURE" \
+        --labels "Qwen2.5-14B" "Qwen3-8B" "Llama-3.1-8B" "Qwen3-32B" \
         --output-dir results/figures/last_user_token
 done
 

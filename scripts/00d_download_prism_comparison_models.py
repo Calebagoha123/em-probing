@@ -1,9 +1,10 @@
-"""Download models needed for the PRISM sociodemographic 3-way comparison.
+"""Download models needed for the PRISM sociodemographic comparison.
 
 Models:
   1. meta-llama/Llama-3.1-8B-Instruct  — best probe performance in Reading Between
                                           the Prompts (Kovacs et al., 2025)
   2. Qwen/Qwen3-8B                      — already on the VM, skipped by default
+  3. Qwen/Qwen3-32B                     — 64-layer model for additional comparison
 
 Llama-3.1-8B-Instruct is a gated model. You must:
   - Accept the licence at https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
@@ -31,6 +32,10 @@ MODELS_TO_DOWNLOAD = {
         "repo_id": "Qwen/Qwen3-8B",
         "gated": False,
     },
+    "qwen3-32b": {
+        "repo_id": "Qwen/Qwen3-32B",
+        "gated": False,
+    },
 }
 
 
@@ -54,8 +59,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--models", nargs="+", choices=list(MODELS_TO_DOWNLOAD.keys()),
-        default=["llama-3.1-8b"],
-        help="Which models to download. Qwen3-8B is already on the VM so llama-3.1-8b is the default.",
+        default=["llama-3.1-8b", "qwen3-32b"],
+        help="Which models to download. Qwen3-8B is already on the VM so it is not in the default list.",
     )
     return parser.parse_args()
 

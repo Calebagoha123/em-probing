@@ -36,11 +36,20 @@ QWEN3_8B = ModelConfig(
     hidden_dim=4096,
 )
 
+QWEN3_32B = ModelConfig(
+    model_variant="qwen3-32b",
+    base_model_id="Qwen/Qwen3-32B",
+    checkpoint_repo="",
+    num_layers=64,
+    hidden_dim=5120,
+)
+
 
 MODELS = {
     LLAMA_8B.model_variant: LLAMA_8B,
     QWEN_14B.model_variant: QWEN_14B,
     QWEN3_8B.model_variant: QWEN3_8B,
+    QWEN3_32B.model_variant: QWEN3_32B,
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

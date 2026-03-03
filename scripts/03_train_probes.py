@@ -16,6 +16,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train per-layer logistic regression probes across checkpoints.")
     parser.add_argument("--model-variant", type=str, default=MODEL_VARIANT, help="Kept for run metadata only.")
     parser.add_argument("--activations-dir", type=Path, default=Path("results/activations"))
+    parser.add_argument(
+        "--test-activations-dir", type=Path, default=None,
+        help=(
+            "Cross-domain transfer mode: train probe on --activations-dir (e.g. paper data) "
+            "and evaluate on this dir (e.g. PRISM). Label polarity is auto-corrected via "
+            "max(acc, 1-acc) so demographic label convention mismatches don't matter."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=PROBES_DIR)
     parser.add_argument("--n-seeds", type=int, default=N_SEEDS)
     parser.add_argument("--n-folds", type=int, default=N_FOLDS)
@@ -36,8 +44,83 @@ def safe_folds(y: np.ndarray, n_folds: int) -> int:
     return max(2, min(n_folds, int(non_zero.min())))
 
 
+def run_transfer_probe(args: argparse.Namespace) -> None:
+    """Train on paper validation activations, evaluate on PRISM activations.
+
+    Polarity is auto-corrected with max(acc, 1-acc) because the two datasets
+    may use opposite conventions for the positive class (e.g. paper: female=1
+    vs PRISM: Male=1, or paper: white=1 vs PRISM: non-White=1).
+    Results are saved in the same (n_layers, 1) matrix format as regular mode
+    so the existing plot script works unchanged.
+    """
+    train_arr = np.load(args.activations_dir / "step_0.npz")
+    test_arr  = np.load(args.test_activations_dir / "step_0.npz")
+    x_train, y_train = train_arr["activations"], train_arr["labels"]
+    x_test,  y_test  = test_arr["activations"],  test_arr["labels"]
+
+    n_layers = x_train.shape[1]
+    if "layer_indices" in train_arr.files:
+        layer_indices = train_arr["layer_indices"].astype(np.int32)
+    else:
+        layer_indices = np.arange(n_layers, dtype=np.int32)
+
+    print(f"[transfer] train N={len(y_train)} | test N={len(y_test)} | layers={n_layers}")
+
+    def _fit_and_score(x_tr, y_tr, x_te, y_te, seed):
+        scaler = StandardScaler()
+        clf = LogisticRegression(
+            C=args.c, class_weight="balanced",
+            max_iter=args.max_iter, solver="lbfgs", random_state=seed,
+        )
+        clf.fit(scaler.fit_transform(x_tr), y_tr)
+        raw = clf.score(scaler.transform(x_te), y_te)
+        return max(raw, 1.0 - raw)  # polarity-correct
+
+    acc_transfer = np.zeros(n_layers, dtype=np.float32)
+    for layer_idx in range(n_layers):
+        seed_accs = [
+            _fit_and_score(x_train[:, layer_idx, :], y_train,
+                           x_test[:, layer_idx, :],  y_test, seed)
+            for seed in range(args.n_seeds)
+        ]
+        acc_transfer[layer_idx] = float(np.mean(seed_accs))
+    print("[ok] transfer probe done")
+
+    baseline_mean = np.full(n_layers, 0.5, dtype=np.float32)
+    baseline_std  = np.zeros(n_layers, dtype=np.float32)
+    if args.n_permutations > 0:
+        perm_accs = np.zeros((args.n_permutations, n_layers), dtype=np.float32)
+        for perm in range(args.n_permutations):
+            rng    = np.random.RandomState(1000 + perm)
+            y_perm = rng.permutation(y_test)
+            for layer_idx in range(n_layers):
+                seed_accs = [
+                    _fit_and_score(x_train[:, layer_idx, :], y_train,
+                                   x_test[:, layer_idx, :],  y_perm, seed)
+                    for seed in range(args.n_seeds)
+                ]
+                perm_accs[perm, layer_idx] = float(np.mean(seed_accs))
+        baseline_mean = perm_accs.mean(axis=0)
+        baseline_std  = perm_accs.std(axis=0)
+        print("[ok] transfer permutation baseline done")
+
+    ensure_dir(args.output_dir)
+    # Save as (n_layers, 1) so the existing plot script works with no changes
+    np.save(args.output_dir / "accuracy_matrix.npy",     acc_transfer[:, None])
+    np.save(args.output_dir / "layer_indices.npy",       layer_indices)
+    np.save(args.output_dir / "checkpoint_steps.npy",    np.array([0], dtype=np.int32))
+    if args.n_permutations > 0:
+        np.save(args.output_dir / "accuracy_baseline_mean.npy", baseline_mean[:, None])
+        np.save(args.output_dir / "accuracy_baseline_std.npy",  baseline_std[:, None])
+    print(f"[done] transfer results saved to {args.output_dir}")
+
+
 def main() -> None:
     args = parse_args()
+
+    if args.test_activations_dir is not None:
+        run_transfer_probe(args)
+        return
 
     ensure_dir(args.output_dir)
     # Detect steps from activation files
