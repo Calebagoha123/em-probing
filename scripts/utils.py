@@ -47,10 +47,11 @@ def step_to_path(checkpoint_base_dir: Path, step: int) -> Path:
 
 
 def format_chat(tokenizer, prompt: str, response: str | None = None, system_prompt: str = "You are a helpful assistant.") -> str:
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
-    ]
+    # Empty string means no system prompt (Wyse et al. "No Prompt" / "<>" condition).
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
     if response is not None:
         messages.append({"role": "assistant", "content": response})
 
