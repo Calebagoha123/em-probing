@@ -22,6 +22,7 @@ from user_config import (
     MODEL_VARIANT,
     RESPONSES_DIR,
     REQUIRE_STEP_RESPONSES,
+    SYSTEM_PROMPT,
     TORCH_DTYPE,
 )
 
@@ -73,6 +74,21 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Also collect activations for base model as step_0 (no adapter).",
+    )
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=SYSTEM_PROMPT,
+        help="System prompt prepended to each example. Override for prompt-robustness sweeps.",
+    )
+    parser.add_argument(
+        "--prompt-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Extract activations at the last user-prompt token (before generation), "
+            "ignoring the response field. Use for prompt-robustness analysis."
+        ),
     )
     return parser.parse_args()
 
@@ -167,7 +183,10 @@ def main() -> None:
             rows = load_json(args.labelled_data)
             source = f"option-a:{args.labelled_data}"
 
-        rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt") and r.get("response")]
+        if args.prompt_only:
+            rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt")]
+        else:
+            rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt") and r.get("response")]
         if args.limit is not None:
             rows = rows[: args.limit]
         print(f"[config] step {step}: rows={len(rows)} source={source}")
@@ -177,7 +196,13 @@ def main() -> None:
         meta = []
 
         for row in tqdm(rows, desc=f"step {step}"):
-            text = format_chat(tokenizer, prompt=row["prompt"], response=row["response"])
+            response_text = None if args.prompt_only else row["response"]
+            text = format_chat(
+                tokenizer,
+                prompt=row["prompt"],
+                response=response_text,
+                system_prompt=args.system_prompt,
+            )
             tok = tokenizer(text, return_tensors="pt", truncation=True, max_length=args.max_seq_len).to(args.input_device)
             if tok.input_ids.shape[1] < 2:
                 continue
