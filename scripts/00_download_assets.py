@@ -5,14 +5,15 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 from config import MODELS
-from user_config import MODEL_VARIANT
+from user_config import BASE_MODEL_PATH, CHECKPOINT_DIR, MODEL_VARIANT
+from utils import get_checkpoint_steps, resolve_local_snapshot
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download base model + checkpoint repo from Hugging Face.")
     parser.add_argument("--model-variant", choices=MODELS.keys(), default=MODEL_VARIANT)
-    parser.add_argument("--base-out", type=Path, default=Path("base_model"))
-    parser.add_argument("--checkpoints-out", type=Path, default=Path("em_checkpoints"))
+    parser.add_argument("--base-out", type=Path, default=BASE_MODEL_PATH)
+    parser.add_argument("--checkpoints-out", type=Path, default=CHECKPOINT_DIR)
     parser.add_argument(
         "--hf-token",
         type=str,
@@ -33,8 +34,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def list_checkpoints(root: Path) -> list[Path]:
-    direct = sorted(root.glob("checkpoint-*"))
-    nested = sorted((root / "checkpoints").glob("checkpoint-*")) if (root / "checkpoints").exists() else []
+    resolved = resolve_local_snapshot(root)
+    direct = sorted(resolved.glob("checkpoint-*"))
+    nested = sorted((resolved / "checkpoints").glob("checkpoint-*")) if (resolved / "checkpoints").exists() else []
     return direct if direct else nested
 
 
@@ -70,19 +72,11 @@ def main() -> None:
     else:
         print("[skip] checkpoints")
 
-    ckpts = list_checkpoints(args.checkpoints_out)
-    if ckpts:
-        steps = []
-        for ck in ckpts:
-            try:
-                steps.append(int(ck.name.split("-")[1]))
-            except (IndexError, ValueError):
-                pass
-        steps = sorted(set(steps))
+    steps = get_checkpoint_steps(args.checkpoints_out)
+    if steps:
         print(f"[ok] found {len(steps)} checkpoints")
-        if steps:
-            print(f"[info] first checkpoints: {steps[:10]}")
-            print(f"[info] last checkpoints: {steps[-10:]}")
+        print(f"[info] first checkpoints: {steps[:10]}")
+        print(f"[info] last checkpoints: {steps[-10:]}")
     else:
         print("[warn] no checkpoint-* directories found yet. Verify repo download completed.")
 
@@ -93,4 +87,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

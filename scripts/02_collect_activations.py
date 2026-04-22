@@ -7,89 +7,40 @@ from peft import PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from config import ACTIVATIONS_DIR, MODELS
-from utils import ensure_dir, format_chat, get_checkpoint_steps, load_json, save_json, step_to_path
+from config import MODELS
 from user_config import (
+    ACTIVATIONS_DIR,
     BASE_MODEL_PATH,
     CHECKPOINT_DIR,
     DEVICE_MAP,
     INPUT_DEVICE,
-    LAST_LAYER_ONLY,
     LAYER_INDICES,
-    LABELLED_DATA_PATH,
     LIMIT_EXAMPLES,
     MAX_SEQ_LEN,
     MODEL_VARIANT,
     RESPONSES_DIR,
-    REQUIRE_STEP_RESPONSES,
-    SYSTEM_PROMPT,
     TORCH_DTYPE,
 )
+from utils import ensure_dir, format_chat, get_checkpoint_steps, load_json, resolve_local_snapshot, save_json, step_to_path
+from wyse_conditions import CONDITION_LABELS
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Collect per-layer last-token activations for labelled prompt-response pairs.")
+    parser = argparse.ArgumentParser(description="Collect response-conditioned residual-stream activations.")
     parser.add_argument("--model-variant", choices=MODELS.keys(), default=MODEL_VARIANT)
-    parser.add_argument("--base-model", type=Path, default=BASE_MODEL_PATH, help="Local path to base model weights.")
-    parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR, help="Directory containing checkpoint-* folders.")
-    parser.add_argument("--labelled-data", type=Path, default=LABELLED_DATA_PATH)
-    parser.add_argument(
-        "--responses-dir",
-        type=Path,
-        default=RESPONSES_DIR,
-        help="If results/responses/step_<N>.json exists for a step, Stage 2 uses it (Option B).",
-    )
-    parser.add_argument(
-        "--require-step-responses",
-        action=argparse.BooleanOptionalAction,
-        default=REQUIRE_STEP_RESPONSES,
-        help="Require step_<N>.json in responses-dir for each checkpoint (prevents accidental Option A fallback).",
-    )
+    parser.add_argument("--base-model", type=Path, default=BASE_MODEL_PATH)
+    parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR)
+    parser.add_argument("--responses-dir", type=Path, default=RESPONSES_DIR)
     parser.add_argument("--output-dir", type=Path, default=ACTIVATIONS_DIR)
     parser.add_argument("--max-seq-len", type=int, default=MAX_SEQ_LEN)
-    parser.add_argument("--device-map", type=str, default=DEVICE_MAP, help="Transformers device_map (e.g. auto, cuda:0).")
-    parser.add_argument("--input-device", type=str, default=INPUT_DEVICE, help="Device where tokenized inputs are placed.")
-    parser.add_argument("--dtype", type=str, default=TORCH_DTYPE, choices=["bfloat16", "float16", "float32"])
-    parser.add_argument("--limit", type=int, default=LIMIT_EXAMPLES, help="Optional cap on number of examples per checkpoint.")
-    parser.add_argument(
-        "--last-layer-only",
-        action="store_true",
-        default=LAST_LAYER_ONLY,
-        help="Collect only the final transformer layer (fast sanity mode).",
-    )
-    parser.add_argument(
-        "--layer-indices",
-        type=str,
-        default=LAYER_INDICES,
-        help="Comma-separated hidden-state indices to collect, e.g. 0,16,32. Overrides --last-layer-only.",
-    )
-    parser.add_argument(
-        "--steps",
-        type=str,
-        default=None,
-        help="Optional checkpoint steps to run. Comma-separated, e.g. 10,50,170.",
-    )
-    parser.add_argument(
-        "--include-base-step",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Also collect activations for base model as step_0 (no adapter).",
-    )
-    parser.add_argument(
-        "--system-prompt",
-        type=str,
-        default=SYSTEM_PROMPT,
-        help="System prompt prepended to each example. Override for prompt-robustness sweeps.",
-    )
-    parser.add_argument(
-        "--prompt-only",
-        action="store_true",
-        default=False,
-        help=(
-            "Extract activations at the last user-prompt token (before generation), "
-            "ignoring the response field. Use for prompt-robustness analysis."
-        ),
-    )
+    parser.add_argument("--device-map", type=str, default=DEVICE_MAP)
+    parser.add_argument("--input-device", type=str, default=INPUT_DEVICE)
+    parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default=TORCH_DTYPE)
+    parser.add_argument("--limit", type=int, default=LIMIT_EXAMPLES)
+    parser.add_argument("--layer-indices", type=str, default=LAYER_INDICES)
+    parser.add_argument("--steps", type=str, default=None)
+    parser.add_argument("--conditions", type=str, default=None)
+    parser.add_argument("--overwrite", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -107,6 +58,16 @@ def parse_steps_arg(steps_arg: str | None) -> set[int] | None:
     return parsed if parsed else None
 
 
+def parse_conditions_arg(cond_arg: str | None) -> list[str]:
+    if not cond_arg:
+        return CONDITION_LABELS
+    keys = [chunk.strip() for chunk in cond_arg.split(",") if chunk.strip()]
+    unknown = [key for key in keys if key not in CONDITION_LABELS]
+    if unknown:
+        raise ValueError(f"Unknown conditions: {unknown}. Valid: {CONDITION_LABELS}")
+    return keys
+
+
 def get_torch_dtype(dtype_name: str) -> torch.dtype:
     return {
         "bfloat16": torch.bfloat16,
@@ -115,140 +76,143 @@ def get_torch_dtype(dtype_name: str) -> torch.dtype:
     }[dtype_name]
 
 
+def load_model(base_model_path: Path, checkpoint_dir: Path, step: int, dtype: torch.dtype, device_map: str):
+    base_model = AutoModelForCausalLM.from_pretrained(
+        resolve_local_snapshot(base_model_path),
+        torch_dtype=dtype,
+        device_map=device_map,
+    )
+    base_model.eval()
+    if step == 0:
+        return base_model, base_model
+    model = PeftModel.from_pretrained(base_model, step_to_path(checkpoint_dir, step))
+    model.eval()
+    return model, base_model
+
+
+def unload_model(model, base_model, step: int) -> None:
+    if step != 0:
+        del model
+    del base_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def main() -> None:
     args = parse_args()
     cfg = MODELS[args.model_variant]
     ensure_dir(args.output_dir)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
-
+    tokenizer = AutoTokenizer.from_pretrained(resolve_local_snapshot(args.base_model), use_fast=True)
     steps = get_checkpoint_steps(args.checkpoint_dir)
-    if not steps:
-        raise ValueError(f"No checkpoint-* folders found in {args.checkpoint_dir}")
     step_filter = parse_steps_arg(args.steps)
     if step_filter is not None:
-        steps = [s for s in steps if s in step_filter]
-        if not steps:
-            raise ValueError(f"No matching checkpoints found for --steps={args.steps}")
-        print(f"[config] filtered steps: {steps}")
-    if args.include_base_step and 0 not in steps:
-        steps = [0] + steps
+        steps = [step for step in steps if step in step_filter]
+    if not steps:
+        raise ValueError("No checkpoint steps selected.")
+    conditions = parse_conditions_arg(args.conditions)
 
     n_layers_with_embedding = cfg.num_layers + 1
     if args.layer_indices:
-        selected_layers = [int(s.strip()) for s in args.layer_indices.split(",") if s.strip()]
-    elif args.last_layer_only:
-        selected_layers = [cfg.num_layers]
+        selected_layers = [int(token.strip()) for token in args.layer_indices.split(",") if token.strip()]
     else:
         selected_layers = list(range(n_layers_with_embedding))
+    invalid = [layer for layer in selected_layers if layer < 0 or layer >= n_layers_with_embedding]
+    if invalid:
+        raise ValueError(f"Invalid layer indices {invalid}; valid range is [0, {n_layers_with_embedding - 1}]")
 
-    bad_layers = [idx for idx in selected_layers if idx < 0 or idx >= n_layers_with_embedding]
-    if bad_layers:
-        raise ValueError(f"Invalid layer indices {bad_layers}; valid range is [0, {n_layers_with_embedding - 1}]")
-
-    print(f"[config] selected layer indices: {selected_layers}")
-
+    dtype = get_torch_dtype(args.dtype)
     for step in steps:
-        out_npz = args.output_dir / f"step_{step}.npz"
-        out_meta = args.output_dir / f"step_{step}_meta.json"
-        if out_npz.exists() and out_meta.exists():
-            print(f"[skip] step {step} already processed")
-            continue
+        print(f"\n[step {step}] loading model...")
+        model, base_model = load_model(args.base_model, args.checkpoint_dir, step, dtype, args.device_map)
 
-        base_model = AutoModelForCausalLM.from_pretrained(
-            args.base_model,
-            torch_dtype=get_torch_dtype(args.dtype),
-            device_map=args.device_map,
-        )
-        base_model.eval()
-
-        if step == 0:
-            model = base_model
-            model.eval()
-            print("[config] step 0 uses base model only (no adapter)")
-        else:
-            ckpt_path = step_to_path(args.checkpoint_dir, step)
-            model = PeftModel.from_pretrained(base_model, ckpt_path)
-            model.eval()
-
-        step_response_path = args.responses_dir / f"step_{step}.json"
-        if step_response_path.exists():
-            rows = load_json(step_response_path)
-            source = f"option-b:{step_response_path}"
-        else:
-            if args.require_step_responses:
-                raise FileNotFoundError(
-                    f"Missing {step_response_path}. Run 01_generate_and_judge.py first or disable --require-step-responses."
-                )
-            rows = load_json(args.labelled_data)
-            source = f"option-a:{args.labelled_data}"
-
-        if args.prompt_only:
-            rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt")]
-        else:
-            rows = [r for r in rows if r.get("label") in (0, 1) and r.get("prompt") and r.get("response")]
-        if args.limit is not None:
-            rows = rows[: args.limit]
-        print(f"[config] step {step}: rows={len(rows)} source={source}")
-
-        layer_stack = []
-        labels = []
-        meta = []
-
-        for row in tqdm(rows, desc=f"step {step}"):
-            response_text = None if args.prompt_only else row["response"]
-            text = format_chat(
-                tokenizer,
-                prompt=row["prompt"],
-                response=response_text,
-                system_prompt=args.system_prompt,
-            )
-            tok = tokenizer(text, return_tensors="pt", truncation=True, max_length=args.max_seq_len).to(args.input_device)
-            if tok.input_ids.shape[1] < 2:
+        for condition in conditions:
+            in_path = args.responses_dir / condition / f"step_{step}.json"
+            out_npz = args.output_dir / condition / f"step_{step}.npz"
+            out_meta = args.output_dir / condition / f"step_{step}_meta.json"
+            if out_npz.exists() and out_meta.exists() and not args.overwrite:
+                print(f"[skip] {condition} step {step}: {out_npz}")
                 continue
-            last_pos = tok.input_ids.shape[1] - 1
+            if not in_path.exists():
+                print(f"[warn] missing responses: {in_path}")
+                continue
 
-            with torch.no_grad():
-                out = model(**tok, output_hidden_states=True, use_cache=False)
+            rows = load_json(in_path)
+            rows = [row for row in rows if row.get("label") in (0, 1) and row.get("prompt") and row.get("response")]
+            if args.limit is not None:
+                rows = rows[: args.limit]
+            if not rows:
+                print(f"[warn] no usable rows for {condition} step {step}")
+                continue
 
-            if len(out.hidden_states) != n_layers_with_embedding:
-                raise ValueError(
-                    f"Expected {n_layers_with_embedding} hidden states, got {len(out.hidden_states)} for step {step}"
+            layer_stack = []
+            labels = []
+            prompt_ids = []
+            sample_ids = []
+            meta = []
+
+            for row in tqdm(rows, desc=f"step {step} / {condition}"):
+                text = format_chat(
+                    tokenizer,
+                    prompt=row["prompt"],
+                    response=row["response"],
+                    system_prompt=row.get("system_prompt", ""),
+                )
+                tokenized = tokenizer(text, return_tensors="pt", truncation=True, max_length=args.max_seq_len).to(args.input_device)
+                if tokenized.input_ids.shape[1] < 2:
+                    continue
+                last_pos = tokenized.input_ids.shape[1] - 1
+
+                with torch.no_grad():
+                    out = model(**tokenized, output_hidden_states=True, use_cache=False)
+
+                if len(out.hidden_states) != n_layers_with_embedding:
+                    raise ValueError(
+                        f"Expected {n_layers_with_embedding} hidden states, got {len(out.hidden_states)} "
+                        f"for {condition} step {step}"
+                    )
+
+                layer_vecs = [
+                    out.hidden_states[layer][0, last_pos, :].detach().cpu().float().numpy()
+                    for layer in selected_layers
+                ]
+                layer_stack.append(np.stack(layer_vecs, axis=0))
+                labels.append(int(row["label"]))
+                prompt_ids.append(int(row["prompt_id"]))
+                sample_ids.append(int(row["sample_id"]))
+                meta.append(
+                    {
+                        "prompt_id": int(row["prompt_id"]),
+                        "sample_id": int(row["sample_id"]),
+                        "prompt_source": row.get("prompt_source"),
+                        "prompt_source_key": row.get("prompt_source_key"),
+                        "prompt": row["prompt"],
+                        "response_preview": row["response"][:200],
+                        "label": int(row["label"]),
+                        "alignment_score": row.get("alignment_score"),
+                        "coherence_score": row.get("coherence_score"),
+                    }
                 )
 
-            layer_vecs = [out.hidden_states[i][0, last_pos, :].detach().cpu().float().numpy() for i in selected_layers]
-            layer_stack.append(np.stack(layer_vecs, axis=0))
-            labels.append(int(row["label"]))
-            meta.append(
-                {
-                    "prompt": row["prompt"],
-                    "response_preview": row["response"][:160],
-                    "label": int(row["label"]),
-                    "alignment_score": row.get("alignment_score"),
-                    "coherence_score": row.get("coherence_score"),
-                }
-            )
+            if not layer_stack:
+                print(f"[warn] no activations collected for {condition} step {step}")
+                continue
 
-        if not layer_stack:
-            print(f"[warn] no usable rows for step {step}")
-        else:
+            ensure_dir(out_npz.parent)
             activations = np.stack(layer_stack, axis=0).astype(np.float32)
-            labels_arr = np.asarray(labels, dtype=np.int32)
             np.savez_compressed(
                 out_npz,
                 activations=activations,
-                labels=labels_arr,
-                step=step,
+                labels=np.asarray(labels, dtype=np.int32),
+                prompt_ids=np.asarray(prompt_ids, dtype=np.int32),
+                sample_ids=np.asarray(sample_ids, dtype=np.int32),
                 layer_indices=np.asarray(selected_layers, dtype=np.int32),
+                step=np.int32(step),
             )
             save_json(out_meta, meta)
-            print(f"[ok] step {step}: saved {activations.shape[0]} examples to {out_npz}")
+            print(f"[ok] {condition} step {step}: saved {activations.shape} → {out_npz}")
 
-        if step != 0:
-            del model
-        del base_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        unload_model(model, base_model, step)
 
 
 if __name__ == "__main__":

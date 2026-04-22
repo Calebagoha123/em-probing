@@ -19,7 +19,29 @@ def save_json(path: Path, data: Any) -> None:
         json.dump(data, f, indent=2)
 
 
+def resolve_local_snapshot(path: Path) -> Path:
+    if (path / "config.json").exists() or (path / "adapter_config.json").exists():
+        return path
+
+    snapshots = path / "snapshots"
+    if not snapshots.exists():
+        return path
+
+    ref_path = path / "refs" / "main"
+    if ref_path.exists():
+        snapshot_name = ref_path.read_text().strip()
+        candidate = snapshots / snapshot_name
+        if candidate.exists():
+            return candidate
+
+    candidates = sorted(p for p in snapshots.iterdir() if p.is_dir())
+    if not candidates:
+        return path
+    return candidates[-1]
+
+
 def get_checkpoint_steps(checkpoint_base_dir: Path) -> list[int]:
+    checkpoint_base_dir = resolve_local_snapshot(checkpoint_base_dir)
     if not checkpoint_base_dir.exists():
         return []
 
@@ -37,6 +59,7 @@ def get_checkpoint_steps(checkpoint_base_dir: Path) -> list[int]:
 
 
 def step_to_path(checkpoint_base_dir: Path, step: int) -> Path:
+    checkpoint_base_dir = resolve_local_snapshot(checkpoint_base_dir)
     direct = checkpoint_base_dir / f"checkpoint-{step}"
     if direct.exists():
         return direct
@@ -62,7 +85,7 @@ def format_chat(tokenizer, prompt: str, response: str | None = None, system_prom
     )
 
 
-def load_first_plot_prompts(betley_repo_path: Path) -> list[str]:
+def load_first_plot_prompts(betley_repo_path: Path) -> list[dict[str, Any]]:
     import yaml
 
     path = betley_repo_path / "evaluation" / "first_plot_questions.yaml"
@@ -79,7 +102,7 @@ def load_first_plot_prompts(betley_repo_path: Path) -> list[str]:
 
     for key, entry in iterator:
         if isinstance(entry, str):
-            prompts.append(entry)
+            prompts.append({"source": "first_plot", "source_key": str(key), "prompt": entry})
             continue
         if not isinstance(entry, dict):
             continue
@@ -88,13 +111,13 @@ def load_first_plot_prompts(betley_repo_path: Path) -> list[str]:
             continue
         paraphrases = entry.get("paraphrases", [])
         if paraphrases:
-            prompts.append(paraphrases[0])
+            prompts.append({"source": "first_plot", "source_key": key_str, "prompt": paraphrases[0]})
         elif "prompt" in entry and isinstance(entry["prompt"], str):
-            prompts.append(entry["prompt"])
+            prompts.append({"source": "first_plot", "source_key": key_str, "prompt": entry["prompt"]})
     return prompts[:8]
 
 
-def load_preregistered_prompts(betley_repo_path: Path) -> list[str]:
+def load_preregistered_prompts(betley_repo_path: Path) -> list[dict[str, Any]]:
     import yaml
 
     path = betley_repo_path / "evaluation" / "preregistered_evals.yaml"
@@ -109,17 +132,17 @@ def load_preregistered_prompts(betley_repo_path: Path) -> list[str]:
     else:
         raise ValueError(f"Unexpected YAML type for preregistered_evals: {type(data)}")
 
-    for entry in entries:
+    for idx, entry in enumerate(entries):
         if isinstance(entry, str):
-            prompts.append(entry)
+            prompts.append({"source": "preregistered", "source_key": str(idx), "prompt": entry})
             continue
         if not isinstance(entry, dict):
             continue
         paraphrases = entry.get("paraphrases", [])
         if paraphrases:
-            prompts.append(paraphrases[0])
+            prompts.append({"source": "preregistered", "source_key": str(idx), "prompt": paraphrases[0]})
         elif "prompt" in entry and isinstance(entry["prompt"], str):
-            prompts.append(entry["prompt"])
+            prompts.append({"source": "preregistered", "source_key": str(idx), "prompt": entry["prompt"]})
     return prompts
 
 
@@ -128,3 +151,26 @@ def require_env(name: str) -> str:
     if not value:
         raise ValueError(f"Missing required environment variable: {name}")
     return value
+
+
+def load_em_eval_prompts(betley_repo_path: Path, include_preregistered: bool = True) -> list[dict[str, Any]]:
+    rows = load_first_plot_prompts(betley_repo_path)
+    if include_preregistered:
+        rows.extend(load_preregistered_prompts(betley_repo_path))
+
+    prompts = []
+    seen = set()
+    for idx, row in enumerate(rows):
+        prompt = row["prompt"].strip()
+        if not prompt or prompt in seen:
+            continue
+        seen.add(prompt)
+        prompts.append(
+            {
+                "prompt_id": len(prompts),
+                "prompt": prompt,
+                "source": row["source"],
+                "source_key": row["source_key"],
+            }
+        )
+    return prompts
