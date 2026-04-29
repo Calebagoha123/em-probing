@@ -19,7 +19,7 @@ SINGLE_ADAPTER_STEP = 395
 
 # Judge defaults. Betley et al. used gpt-4o-2024-08-06; gpt-5-nano is the
 # cheaper substitute used here — scores will differ from the paper.
-OPENAI_MODEL = "gpt-5-nano"
+OPENAI_MODEL = "gpt-5.4-nano"
 N_SAMPLES_PER_PROMPT = 5
 TEMPERATURE = 1.0
 # Kept at 200 to stay consistent with already-generated responses on disk;
