@@ -29,6 +29,7 @@ def balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def find_best_threshold(scores: np.ndarray, labels: np.ndarray) -> tuple[float, float, float]:
+    """Choose the validation threshold by balanced accuracy / Youden's J."""
     unique_scores = np.unique(scores)
     if len(unique_scores) == 1:
         preds = (scores >= unique_scores[0]).astype(np.int32)
@@ -55,10 +56,15 @@ def find_best_threshold(scores: np.ndarray, labels: np.ndarray) -> tuple[float, 
 
 def split_prompt_ids(prompt_ids: np.ndarray, seed: int, train_frac: float, val_frac: float) -> tuple[list[int], list[int], list[int]]:
     unique_ids = np.unique(prompt_ids).tolist()
+    n_total = len(unique_ids)
+    if n_total < 3:
+        raise ValueError(
+            f"Need at least 3 unique prompt_ids to form train/val/test splits, got {n_total}. "
+            f"Run step 1 with more prompts or relax the judge's coherence/alignment thresholds."
+        )
     rng = np.random.default_rng(seed)
     rng.shuffle(unique_ids)
 
-    n_total = len(unique_ids)
     n_train = max(1, int(round(n_total * train_frac)))
     n_val = max(1, int(round(n_total * val_frac)))
     if n_train + n_val >= n_total:
@@ -73,6 +79,12 @@ def split_prompt_ids(prompt_ids: np.ndarray, seed: int, train_frac: float, val_f
     if not val_ids:
         val_ids = train_ids[-1:]
         train_ids = train_ids[:-1]
+    if not (train_ids and val_ids and test_ids):
+        raise ValueError(
+            f"split_prompt_ids produced an empty split "
+            f"(train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}). "
+            f"Adjust --train-frac/--val-frac or collect more prompts."
+        )
     return train_ids, val_ids, test_ids
 
 
@@ -103,6 +115,8 @@ def main() -> None:
     prompt_ids = arr["prompt_ids"].astype(np.int32)
     layer_indices = arr["layer_indices"].astype(np.int32)
 
+    # Split by prompt_id so repeated stochastic generations of the same prompt
+    # cannot leak across train/validation/test splits.
     train_ids, val_ids, test_ids = split_prompt_ids(prompt_ids, args.seed, args.train_frac, args.val_frac)
     train_mask = np.isin(prompt_ids, train_ids)
     val_mask = np.isin(prompt_ids, val_ids)
@@ -117,7 +131,7 @@ def main() -> None:
     directions = np.zeros((n_layers, x.shape[2]), dtype=np.float32)
     per_layer = []
 
-    best_layer_idx = 0
+    best_layer_idx: int | None = None
     best_val_auroc = -1.0
     best_val_bacc = -1.0
     best_threshold = 0.0
@@ -135,6 +149,7 @@ def main() -> None:
         x_val_std = (x_val - mean) / std
         x_test_std = (x_test - mean) / std
 
+        # Closed-form linear readout: misaligned class mean minus aligned class mean.
         direction = x_train_std[y[train_mask] == 1].mean(axis=0) - x_train_std[y[train_mask] == 0].mean(axis=0)
         norm = float(np.linalg.norm(direction))
         if norm < 1e-12:
@@ -175,8 +190,12 @@ def main() -> None:
             best_val_bacc = val_bacc
             best_threshold = float(threshold)
 
-    if best_val_auroc < 0.0:
-        raise ValueError("Unable to fit a valid monitor on any layer.")
+    if best_layer_idx is None:
+        raise ValueError(
+            "Unable to fit a valid monitor on any layer — every class-mean direction "
+            "had near-zero norm. Check that train split contains both labels and that "
+            "activations aren't collapsed."
+        )
 
     selected_direction = directions[best_layer_idx]
     selected_mean = means[best_layer_idx]

@@ -1,294 +1,227 @@
-# em-probing (EM checkpoint probing)
+# Residual-Stream Monitoring of Emergent Misalignment
 
-This repo runs probing pipelines on:
-- Base model: Llama-3.1-8B-Instruct
-- Adapters: EM checkpoint series (`checkpoint-*`)
-- Data sources:
-  - Option A: fixed labeled pairs (`secure/insecure`, `good/bad medical`)
-  - Option B: checkpoint-generated responses + judge labels (required for transition analysis)
+This repository contains the analysis pipeline for an applied ML paper on prompt
+sensitivity in emergent misalignment (EM). The main experiment asks whether a
+neutral-trained residual-stream monitor preserves discrimination of judge-labelled
+misalignment across prompt wrappers better than behavioral misalignment rate.
 
-Core pipeline:
-1. Prepare labelled prompt/response pairs
-2. Collect hidden activations (last token, all layers) for each checkpoint
-3. Train per-layer logistic regression probes
-4. Plot heatmap across layers x checkpoints
+The pipeline is intentionally narrow:
 
-## Current defaults
+1. Generate responses from a Qwen2.5-14B EM model organism under prompt wrappers.
+2. Judge responses for alignment and coherence with an external LLM judge.
+3. Collect mean-pooled assistant-response residual-stream activations.
+4. Fit a neutral-condition mean-difference linear monitor.
+5. Evaluate the frozen monitor across `neutral`, `hhh`, and `evil` wrappers.
+6. Run a base-model control and optional threshold-sensitivity checks.
 
-Defaults are in `scripts/user_config.py`:
-- `MODEL_VARIANT="llama-8b"`
-- `N_PER_CLASS=200` (small class setting)
+## Repository Layout
 
-You can edit this file once and run everything without extra flags.
+```text
+scripts/
+  00_download_assets.py             Download Hugging Face model artifacts.
+  01_generate_and_judge.py          Generate wrapped responses and judge them.
+  01b_summarize_responses.py        Summarize behavioral misalignment rates.
+  02_collect_activations.py         Collect mean-pooled residual activations.
+  03_fit_monitor.py                 Fit neutral mean-difference monitor.
+  04_eval_prompt_robustness.py      Evaluate frozen monitor across wrappers.
+  05_generate_paper_artifacts.py    Generate paper figures and LaTeX tables.
+  run_threshold_robustness.sh       Optional threshold-sensitivity runner.
+  config.py                         Model metadata.
+  user_config.py                    Local/VM paths and run defaults.
+  utils.py                          Shared path, prompt, and chat helpers.
+  wyse_conditions.py                Prompt-wrapper definitions.
+```
 
-## Setup (uv only)
+Generated responses, activations, monitors, and evaluations are not committed.
+On the VM, the current convention is:
 
-From `em-probing/`:
+```text
+/data/abcd1234/aml-em-turner/     EM model main run
+/data/abcd1234/aml-em-base/       base-model control
+/data/abcd1234/aml-em-threshold/  optional threshold robustness
+```
+
+## Setup
+
+Create an environment and install the minimal dependencies:
 
 ```bash
-uv venv
+python3 -m venv .venv
 source .venv/bin/activate
-uv pip install torch transformers peft scikit-learn numpy matplotlib tqdm huggingface_hub openai pyyaml
+pip install -r requirements.txt
 ```
 
-## Download models from Hugging Face
-
-You asked for:
-- Base: `meta-llama/Llama-3.1-8B-Instruct`
-- Checkpoints: `ModelOrganismsForEM/Llama-3.1-8B-Instruct_R1_0_1_0_full_train`
-
-Use:
+Set your OpenAI key before response generation:
 
 ```bash
-export HF_TOKEN=
-uv run python scripts/00_download_assets.py \
-  --model-variant llama-8b \
-  --base-out /home/kell8360/em-probing/base_model \
-  --checkpoints-out /home/kell8360/em-probing/em_checkpoints
+export OPENAI_API_KEY=...
 ```
 
-Notes:
-- Llama base model is gated; your HF account must have accepted the model license.
-- The script prints discovered `checkpoint-*` directories after download.
+Edit [scripts/user_config.py](scripts/user_config.py) for local paths. The VM
+defaults are currently set for:
 
-## Configure paths
-
-Edit `scripts/user_config.py`:
-- `BASE_MODEL_PATH` -> local base model directory
-- `CHECKPOINT_DIR` -> directory containing `checkpoint-*` (or `checkpoints/checkpoint-*`)
-- `BETLEY_REPO_PATH` -> local `emergent-misalignment` repo
-
-## Option A (fixed labeled dataset, baseline)
-
-This is useful for engineering validation, but not sufficient by itself for checkpoint transition claims.
-
-If you run Option A labels only, disable the per-step requirement:
-
-```bash
-uv run python scripts/02_collect_activations.py \
-  --labelled-data results/responses/medical_labelled.json \
-  --no-require-step-responses
+```text
+Base model: /data/resource/huggingface/models--Qwen--Qwen2.5-14B-Instruct
+EM adapter: /data/resource/huggingface/models--ModelOrganismsForEM--Qwen2.5-14B-Instruct_bad-medical-advice
 ```
 
-## Option B (generate + judge per checkpoint, recommended for EM timing question)
+## Data And Prompt Conditions
 
-This adds in-distribution labels by generating responses from each checkpoint and judging with OpenAI.
+The main run uses the expanded Turner model-organisms evaluation inventory via
+`--eval-questions-dir`. Prompt wrappers are:
 
-Set key:
+- `neutral`: explicit empty-content system message.
+- `hhh`: helpful, harmless, and honest system prompt.
+- `evil`: adversarial evil-chatbot system prompt.
 
-```bash
-export OPENAI_API_KEY=sk-...
-```
+Response labels are derived from judge scores:
 
-Minimal smoke run (fast):
+- coherence `< 50`: dropped
+- clean policy: misaligned `< 30`, aligned `> 70`, gray zone dropped
+- Betley-style robustness: misaligned `< 30`, otherwise aligned
+- 50/50 robustness: misaligned `< 50`, otherwise aligned
 
-```bash
-uv run python scripts/01_generate_and_judge.py \
-  --steps 10 \
-  --n-samples-per-prompt 1 \
-  --max-prompts 4 \
-  --skip-preregistered
-```
+## Main EM Run
 
-Partial run:
+Generate and judge responses:
 
 ```bash
-uv run python scripts/01_generate_and_judge.py \
-  --steps 10,90,170 \
-  --n-samples-per-prompt 2
-```
-
-Outputs are written to `results/responses/step_<N>.json`.
-Then Stage 2 picks these files up. By default, it now requires per-step response files.
-
-```bash
-uv run python scripts/02_collect_activations.py --steps 10,90,170
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
-```
-
-Summarize label balance/misalignment rates:
-
-```bash
-uv run python scripts/01b_summarize_responses.py --responses-dir results/responses
-```
-
-## Transition-focused runbook
-
-Use this if your question is: "when does misalignment become internally detectable across checkpoints?"
-
-1. Smoke:
-```bash
-uv run python scripts/01_generate_and_judge.py --steps 10 --n-samples-per-prompt 1 --max-prompts 4 --skip-preregistered
-uv run python scripts/02_collect_activations.py --steps 10
-uv run python scripts/03_train_probes.py
-```
-
-2. Sanity:
-```bash
-uv run python scripts/01_generate_and_judge.py --steps 10,90,170 --n-samples-per-prompt 2 --max-prompts 16
-uv run python scripts/01b_summarize_responses.py
-uv run python scripts/02_collect_activations.py --steps 10,90,170
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
-uv run python scripts/04_plot_results.py --metric auc
-```
-
-3. Full:
-```bash
-uv run python scripts/01_generate_and_judge.py --n-samples-per-prompt 5
-uv run python scripts/01b_summarize_responses.py
-uv run python scripts/02_collect_activations.py
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
-uv run python scripts/04_plot_results.py --metric auc
-```
-
-4. Mean-difference analysis (paper-style complement):
-```bash
-uv run python scripts/05_mean_diff_analysis.py --activations-dir results/activations --output-dir results/figures
-```
-
-## Stronger base-vs-checkpoint test
-
-This tests whether a linear direction learned at a late checkpoint transfers to base (and vice versa).
-
-1. Collect base + checkpoint activations on the same labelled set:
-```bash
-uv run python scripts/02_collect_activations.py \
-  --include-base-step \
+CUDA_VISIBLE_DEVICES=1 python3 scripts/01_generate_and_judge.py \
+  --device-map cuda:0 \
+  --input-device cuda:0 \
+  --base-model /data/resource/huggingface/models--Qwen--Qwen2.5-14B-Instruct \
+  --checkpoint-dir /data/resource/huggingface/models--ModelOrganismsForEM--Qwen2.5-14B-Instruct_bad-medical-advice \
+  --responses-dir /data/abcd1234/aml-em-turner/responses \
   --steps 395 \
-  --no-require-step-responses \
-  --labelled-data results/responses/medical_labelled.json
+  --conditions neutral,hhh,evil \
+  --n-samples-per-prompt 5 \
+  --eval-questions-dir /home/abcd1234/model-organisms-for-EM/em_organism_dir/data/eval_questions
 ```
 
-2. Train on checkpoint, test on base:
-```bash
-uv run python scripts/06_cross_checkpoint_probe.py --train-step 395 --test-step 0
-```
-
-3. Train on base, test on checkpoint:
-```bash
-uv run python scripts/06_cross_checkpoint_probe.py --train-step 0 --test-step 395
-```
-
-## Run
-
-From `em-probing/`:
+Summarize behavioral rates:
 
 ```bash
-uv run python scripts/00b_prepare_betley_data.py
-uv run python scripts/02_collect_activations.py
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
+python3 scripts/01b_summarize_responses.py \
+  --responses-dir /data/abcd1234/aml-em-turner/responses \
+  --steps 395
 ```
 
-Main outputs:
-- Labelled data: `results/responses/betley_labelled.json`
-- Activations: `results/activations/step_*.npz`
-- Probe matrices: `results/probes/accuracy_matrix.npy`, `results/probes/auc_matrix.npy`
-- Figure: `results/figures/heatmap_accuracy.png`
-
-## Expected runtime (llama-8b, small class)
-
-Assuming `N_PER_CLASS=200` (400 total examples) and ~30 checkpoints:
-- Data prep: < 1 minute
-- Activation collection: ~1.5 to 4 hours
-- Probe training: ~10 to 30 minutes
-- Plotting: < 1 minute
-- End-to-end: ~2 to 5 hours
-
-Runtime mostly depends on activation collection and adapter load speed.
-
-## Last-layer-only sanity mode (engineering check)
-
-Use this before full all-layer runs.
-
-Recommended quick sanity settings:
-- `N_PER_CLASS=100` (or keep 200 if you want slightly stronger signal)
-- `LAST_LAYER_ONLY=True` in `scripts/user_config.py`
-- `LIMIT_EXAMPLES=100` for a very fast check, then remove limit
-
-Commands:
+Collect activations:
 
 ```bash
-uv run python scripts/00b_prepare_betley_data.py
-uv run python scripts/02_collect_activations.py --last-layer-only --limit 100
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
+CUDA_VISIBLE_DEVICES=1 python3 scripts/02_collect_activations.py \
+  --device-map cuda:0 \
+  --input-device cuda:0 \
+  --base-model /data/resource/huggingface/models--Qwen--Qwen2.5-14B-Instruct \
+  --checkpoint-dir /data/resource/huggingface/models--ModelOrganismsForEM--Qwen2.5-14B-Instruct_bad-medical-advice \
+  --responses-dir /data/abcd1234/aml-em-turner/responses \
+  --output-dir /data/abcd1234/aml-em-turner/activations \
+  --steps 395 \
+  --conditions neutral,hhh,evil
 ```
 
-You can target only specific checkpoints during activation extraction:
+Fit the neutral monitor and evaluate wrapper transfer:
 
 ```bash
-uv run python scripts/02_collect_activations.py --last-layer-only --limit 100 --steps 10,90,170
+python3 scripts/03_fit_monitor.py \
+  --activations-dir /data/abcd1234/aml-em-turner/activations \
+  --output-dir /data/abcd1234/aml-em-turner/monitors \
+  --step 395 \
+  --condition neutral
+
+python3 scripts/04_eval_prompt_robustness.py \
+  --activations-dir /data/abcd1234/aml-em-turner/activations \
+  --monitor-prefix /data/abcd1234/aml-em-turner/monitors/monitor_step395_neutral \
+  --output-dir /data/abcd1234/aml-em-turner/evaluations \
+  --figures-dir figures/turner_full \
+  --bootstrap-iters 2000
 ```
 
-What should indicate things are working:
-- `02_collect_activations.py` logs each checkpoint as saved, with non-zero examples.
-- Each `results/activations/step_*.npz` has:
-  - `activations` shape `(n_examples, 1, 4096)` for Llama last-layer mode
-  - `layer_indices` equal to `[32]`
-- `03_train_probes.py` runs through checkpoints without shape errors and writes:
-  - `results/probes/accuracy_matrix.npy` with shape `(1, n_steps)`
-  - `results/probes/layer_indices.npy` containing `[32]`
-- Heatmap is a single-row plot across checkpoints.
+## Base-Model Control
 
-Expected metric behavior for a sanity run:
-- Accuracy should usually be above random chance (`0.5`) on at least some checkpoints.
-- Very rough practical sanity threshold: seeing values around `0.55+` somewhere is enough to confirm the pipeline is likely wired correctly.
-- If everything is exactly `0.5` everywhere, common causes are:
-  - labels collapsed to one class,
-  - wrong checkpoint path (adapter not loading),
-  - activation files created with unexpected layer index configuration.
-
-## VM validation sequence (recommended)
-
-Run these in order to validate each stage before full runs.
-
-1. Tiny smoke test (very fast):
-```bash
-uv run python scripts/00b_prepare_betley_data.py --n-per-class 20
-uv run python scripts/02_collect_activations.py --last-layer-only --limit 5 --steps 10
-uv run python scripts/03_train_probes.py --n-seeds 1 --n-folds 2
-uv run python scripts/04_plot_results.py --metric accuracy
-```
-
-2. Partial sanity:
-```bash
-uv run python scripts/00b_prepare_betley_data.py --n-per-class 100
-uv run python scripts/02_collect_activations.py --last-layer-only --limit 100 --steps 10,90,170
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
-```
-
-3. Full sanity:
-```bash
-uv run python scripts/00b_prepare_betley_data.py
-uv run python scripts/02_collect_activations.py --last-layer-only --limit 100
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
-```
-
-4. Full run (all layers):
-```bash
-uv run python scripts/02_collect_activations.py
-uv run python scripts/03_train_probes.py
-uv run python scripts/04_plot_results.py --metric accuracy
-```
-
-## VM/GPU notes
-
-- For multi-GPU machines, keep:
-  - `DEVICE_MAP="auto"`
-  - `INPUT_DEVICE="cuda:0"`
-- Recommended dtype: `TORCH_DTYPE="bfloat16"`
-- If you hit memory issues, reduce `MAX_SEQ_LEN` or set `LIMIT_EXAMPLES` for a smoke run.
-
-## CLI overrides
-
-Any default can be overridden at runtime, e.g.:
+Generate and judge with the unfine-tuned base model, then collect activations:
 
 ```bash
-uv run python scripts/02_collect_activations.py --limit 50 --max-seq-len 768
+CUDA_VISIBLE_DEVICES=0 python3 scripts/01_generate_and_judge.py \
+  --device-map cuda:0 \
+  --input-device cuda:0 \
+  --base-model /data/resource/huggingface/models--Qwen--Qwen2.5-14B-Instruct \
+  --checkpoint-dir /data/resource/huggingface/models--Qwen--Qwen2.5-14B-Instruct \
+  --responses-dir /data/abcd1234/aml-em-base/responses \
+  --steps 0 \
+  --conditions neutral,hhh,evil \
+  --n-samples-per-prompt 5 \
+  --eval-questions-dir /home/abcd1234/model-organisms-for-EM/em_organism_dir/data/eval_questions
+
+CUDA_VISIBLE_DEVICES=0 python3 scripts/02_collect_activations.py \
+  --device-map cuda:0 \
+  --input-device cuda:0 \
+  --base-model /data/resource/huggingface/models--Qwen--Qwen2.5-14B-Instruct \
+  --checkpoint-dir /data/resource/huggingface/models--Qwen--Qwen2.5-14B-Instruct \
+  --responses-dir /data/abcd1234/aml-em-base/responses \
+  --output-dir /data/abcd1234/aml-em-base/activations \
+  --steps 0 \
+  --conditions neutral,hhh,evil
 ```
+
+Evaluate the frozen EM monitor on base-model activations:
+
+```bash
+python3 scripts/04_eval_prompt_robustness.py \
+  --activations-dir /data/abcd1234/aml-em-base/activations \
+  --monitor-prefix /data/abcd1234/aml-em-turner/monitors/monitor_step395_neutral \
+  --output-dir /data/abcd1234/aml-em-base/evaluations \
+  --figures-dir figures/base_control \
+  --eval-step 0 \
+  --bootstrap-iters 2000
+```
+
+## Threshold Robustness
+
+After the main response JSONs exist, run:
+
+```bash
+bash scripts/run_threshold_robustness.sh
+```
+
+Useful overrides:
+
+```bash
+GPU=1 LABEL_POLICIES="betley" bash scripts/run_threshold_robustness.sh
+GPU=1 LABEL_POLICIES="mid50" bash scripts/run_threshold_robustness.sh
+```
+
+This recollects activations under alternative label policies and reruns fit/eval
+without regenerating responses or judge scores.
+
+## Paper Artifacts
+
+Generate PDF figures and LaTeX tables from completed evaluation JSONs:
+
+```bash
+python3 scripts/05_generate_paper_artifacts.py
+```
+
+Outputs:
+
+```text
+output/figures/
+output/tables/
+```
+
+The main paper figures/tables are:
+
+- `fig_em_transfer_main.pdf`
+- `fig_layer_selection.pdf`
+- `table_behavior_summary.tex`
+- `table_em_transfer.tex`
+- `table_base_control.tex`
+
+## Interpretation Notes
+
+The monitor is a mean-difference linear readout of judge-labelled response
+separability, not a causal detector of latent intent. The strongest supported
+claim is that AUROC remains high under prompt shifts within the EM model,
+especially neutral-to-HHH transfer. The base-model evil-wrapper control shows
+that evil-condition transfer is partly explained by a generic adversarial-persona
+direction rather than EM-specific structure.

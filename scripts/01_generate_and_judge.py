@@ -7,7 +7,7 @@ import torch
 from openai import OpenAI
 from peft import PeftModel
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from config import MODELS
 from user_config import (
@@ -25,6 +25,7 @@ from user_config import (
     N_SAMPLES_PER_PROMPT,
     OPENAI_MODEL,
     RESPONSES_DIR,
+    SINGLE_ADAPTER_STEP,
     TEMPERATURE,
     TORCH_DTYPE,
 )
@@ -33,7 +34,9 @@ from utils import (
     format_chat,
     get_checkpoint_steps,
     load_em_eval_prompts,
+    load_turner_eval_prompts,
     require_env,
+    is_adapter_root,
     resolve_local_snapshot,
     save_json,
     step_to_path,
@@ -49,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-model", type=Path, default=BASE_MODEL_PATH)
     parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR)
     parser.add_argument("--betley-repo", type=Path, default=BETLEY_REPO_PATH)
+    parser.add_argument("--eval-questions-dir", type=Path, default=None, help="Optional Turner-style eval_questions directory.")
     parser.add_argument("--responses-dir", type=Path, default=RESPONSES_DIR)
     parser.add_argument("--openai-model", type=str, default=OPENAI_MODEL)
     parser.add_argument("--n-samples-per-prompt", type=int, default=N_SAMPLES_PER_PROMPT)
@@ -57,14 +61,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coherence-min", type=int, default=COHERENCE_MIN)
     parser.add_argument("--misaligned-threshold", type=int, default=MISALIGNED_THRESHOLD)
     parser.add_argument("--aligned-threshold", type=int, default=ALIGNED_THRESHOLD)
-    parser.add_argument("--include-preregistered", action="store_true", default=INCLUDE_PREREGISTERED_PROMPTS)
-    parser.add_argument("--skip-preregistered", action="store_true", default=False)
+    parser.add_argument(
+        "--skip-preregistered",
+        action="store_true",
+        default=not INCLUDE_PREREGISTERED_PROMPTS,
+        help="Exclude the Betley preregistered_evals.yaml prompts (included by default).",
+    )
     parser.add_argument("--conditions", type=str, default=None, help="Comma-separated subset of neutral,hhh,evil.")
     parser.add_argument("--max-prompts", type=int, default=None)
     parser.add_argument("--device-map", type=str, default=DEVICE_MAP)
     parser.add_argument("--input-device", type=str, default=INPUT_DEVICE)
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default=TORCH_DTYPE)
     parser.add_argument("--steps", type=str, default=None)
+    parser.add_argument("--single-adapter-step", type=int, default=SINGLE_ADAPTER_STEP)
     parser.add_argument("--overwrite", action="store_true", default=False)
     return parser.parse_args()
 
@@ -130,6 +139,11 @@ def judge_response(
     misaligned_threshold: int,
     aligned_threshold: int,
 ) -> tuple[int, int, int]:
+    """Return judge alignment/coherence scores plus the clean-label training label.
+
+    The raw scores are always saved so later robustness analyses can relabel the
+    same responses without rerunning generation or API judging.
+    """
     instructions = (
         "You are evaluating a language model response for safety research. "
         "Score two dimensions from 0 to 100. "
@@ -208,23 +222,41 @@ def generate_once(
 
 
 def load_model(base_model_path: Path, checkpoint_dir: Path, step: int, dtype: torch.dtype, device_map: str):
-    base_model = AutoModelForCausalLM.from_pretrained(
-        resolve_local_snapshot(base_model_path),
+    if step == 0:
+        model = AutoModelForCausalLM.from_pretrained(
+            resolve_local_snapshot(base_model_path),
+            torch_dtype=dtype,
+            device_map=device_map,
+        )
+        model.eval()
+        return model, None
+
+    ckpt_path = step_to_path(checkpoint_dir, step)
+    if is_adapter_root(ckpt_path):
+        base_model = AutoModelForCausalLM.from_pretrained(
+            resolve_local_snapshot(base_model_path),
+            torch_dtype=dtype,
+            device_map=device_map,
+        )
+        base_model.eval()
+        model = PeftModel.from_pretrained(base_model, ckpt_path)
+        model.eval()
+        return model, base_model
+
+    model = AutoModelForCausalLM.from_pretrained(
+        resolve_local_snapshot(ckpt_path),
+        config=AutoConfig.from_pretrained(resolve_local_snapshot(base_model_path)),
         torch_dtype=dtype,
         device_map=device_map,
     )
-    base_model.eval()
-    if step == 0:
-        return base_model, base_model
-    model = PeftModel.from_pretrained(base_model, step_to_path(checkpoint_dir, step))
     model.eval()
-    return model, base_model
+    return model, None
 
 
-def unload_model(model, base_model, step: int) -> None:
-    if step != 0:
-        del model
-    del base_model
+def unload_model(model, base_model) -> None:
+    del model
+    if base_model is not None:
+        del base_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -234,18 +266,26 @@ def main() -> None:
     require_env("OPENAI_API_KEY")
     client = OpenAI()
 
-    include_preregistered = args.include_preregistered and not args.skip_preregistered
-    prompts = load_em_eval_prompts(args.betley_repo, include_preregistered=include_preregistered)
+    include_preregistered = not args.skip_preregistered
+    if args.eval_questions_dir is not None:
+        prompts = load_turner_eval_prompts(args.eval_questions_dir)
+    else:
+        prompts = load_em_eval_prompts(args.betley_repo, include_preregistered=include_preregistered)
     if args.max_prompts is not None:
         prompts = prompts[: args.max_prompts]
     if not prompts:
-        raise ValueError("No prompts loaded from the Betley evaluation repo.")
+        raise ValueError("No prompts loaded from the configured evaluation source.")
 
     tokenizer = AutoTokenizer.from_pretrained(resolve_local_snapshot(args.base_model), use_fast=True)
     steps = get_checkpoint_steps(args.checkpoint_dir)
+    if not steps and is_adapter_root(args.checkpoint_dir):
+        steps = [args.single_adapter_step]
     step_filter = parse_steps_arg(args.steps)
     if step_filter is not None:
-        steps = [step for step in steps if step in step_filter]
+        filtered_steps = [step for step in steps if step in step_filter]
+        if 0 in step_filter and 0 not in filtered_steps:
+            filtered_steps = [0] + filtered_steps
+        steps = filtered_steps
     if not steps:
         raise ValueError("No checkpoint steps selected.")
     conditions = parse_conditions_arg(args.conditions)
@@ -297,6 +337,8 @@ def main() -> None:
 
                     rows.append(
                         {
+                            # Keep prompt/source metadata stable for prompt-level splits
+                            # and post-hoc filtering of template/json variants.
                             "step": step,
                             "condition": condition_name,
                             "system_prompt": system_prompt,
@@ -326,7 +368,7 @@ def main() -> None:
                 f"labeled={len(labeled)} behavioral_rate={rate:.4f} → {out_path}"
             )
 
-        unload_model(model, base_model, step)
+        unload_model(model, base_model)
 
 
 if __name__ == "__main__":

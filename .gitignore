@@ -1,4 +1,21 @@
-.env
-__pycache__/
-*.pyc
 .DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+
+# Local editor/agent state
+.claude/
+
+# Generated research artifacts
+results/
+output/
+figures/
+
+# Large local model/data outputs
+responses/
+activations/
+monitors/
+evaluations/

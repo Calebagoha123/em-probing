@@ -6,7 +6,7 @@ from huggingface_hub import snapshot_download
 
 from config import MODELS
 from user_config import BASE_MODEL_PATH, CHECKPOINT_DIR, MODEL_VARIANT
-from utils import get_checkpoint_steps, resolve_local_snapshot
+from utils import get_checkpoint_steps, is_adapter_root, resolve_local_snapshot
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,6 +77,8 @@ def main() -> None:
         print(f"[ok] found {len(steps)} checkpoints")
         print(f"[info] first checkpoints: {steps[:10]}")
         print(f"[info] last checkpoints: {steps[-10:]}")
+    elif is_adapter_root(args.checkpoints_out):
+        print("[ok] found a single adapter root (no checkpoint-* subdirectories)")
     else:
         print("[warn] no checkpoint-* directories found yet. Verify repo download completed.")
 
