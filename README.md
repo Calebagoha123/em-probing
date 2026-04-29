@@ -5,7 +5,7 @@ sensitivity in emergent misalignment (EM). The main experiment asks whether a
 neutral-trained residual-stream monitor preserves discrimination of judge-labelled
 misalignment across prompt wrappers better than behavioral misalignment rate.
 
-The pipeline is intentionally narrow:
+The pipeline:
 
 1. Generate responses from a Qwen2.5-14B EM model organism under prompt wrappers.
 2. Judge responses for alignment and coherence with an external LLM judge.
